@@ -50,8 +50,7 @@ SELF_CHECK_TRIGGERS = (
     "definitely", "always", "never", "guarantee", "means that", "so we should",
 )
 
-META_FOLLOWUPS = ("why", "why?", "explain", "how come", "what do you mean",
-                  "what?", "huh", "why not", "why not?", "which", "how")
+META_FOLLOWUPS = ("why", "why?", "explain", "how come", "what do you mean", "what?", "huh", "why not", "why not?", "which", "how", "why can't", "why cant", "explain why")
 
 EXHAUSTIVE_TRIGGERS = (
     "all plots", "all charts", "every chart", "every plot",
@@ -92,7 +91,7 @@ if LLM_MODEL is None:
     st.stop()
 
 # =============================================================================
-# SYSTEM PROMPT
+# SYSTEM PROMPT (Updated with CALCULATIONS rule)
 # =============================================================================
 SYSTEM_PROMPT = "\n".join([
     "You are a senior RevOps (Revenue Operations) consultant for a B2B sales team.",
@@ -102,6 +101,7 @@ SYSTEM_PROMPT = "\n".join([
     "GREETINGS: If the user just says 'hello', 'hi', or 'what', reply politely. Do NOT add a citation to a greeting.",
     "",
     "GROUNDING: use ONLY facts in CONTEXT. If not in CONTEXT: reply exactly 'The provided model artifacts do not contain this information.'",
+    "CALCULATIONS: If the user provides hypothetical inputs and asks you to calculate a score based on the rules, DO THE MATH using the formulas in CONTEXT. State that the inputs are hypothetical.",
     "",
     "PUSHBACK:",
     "1. Do NOT confirm false premises. If a user claims 'Champions always convert', correct them: High fit + engagement correlates with likelihood, but doesn't guarantee conversion.",
@@ -156,11 +156,17 @@ def retrieve(query: str, top_k: int = TOP_K):
     hints = detect_intents(query)
     effective_k = max(top_k, min(len(hints) + 2, 8))
     
+    # FIX: Do not penalize report pages if the user is asking for a chart
+    is_chart_query = any(kw in query.lower() for kw in ["chart", "plot", "graph"])
+    
     sims = raw_sims.copy()
     for i, c in enumerate(CHUNKS):
         s = float(raw_sims[i])
-        if c["type"] in hints: s = s * INTENT_BOOST_MULT + INTENT_BOOST_ADD
-        elif c["type"] == "report_page": s = s - REPORT_PENALTY
+        if c["type"] in hints: 
+            s = s * INTENT_BOOST_MULT + INTENT_BOOST_ADD
+        elif c["type"] == "report_page": 
+            if not is_chart_query:
+                s = s - REPORT_PENALTY
         sims[i] = s
         
     top_idx = list(np.argsort(sims)[::-1][:effective_k])
