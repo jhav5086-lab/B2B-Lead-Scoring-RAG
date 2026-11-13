@@ -19,8 +19,9 @@ if not GROQ_API_KEY:
     st.error("🚨 **Missing API Key:** add GROQ_API_KEY to Streamlit secrets.")
     st.stop()
 
-if not os.path.exists("./embeddings/embeddings.npy") or not os.path.exists("./embeddings/chunks.json"):
-    st.error("🚨 **Missing Files:** could not find ./embeddings/ folder. Please run the artifact generation script.")
+# We ONLY check for chunks.json now. No .npy file needed!
+if not os.path.exists("./embeddings/chunks.json"):
+    st.error("🚨 **Missing Files:** could not find ./embeddings/chunks.json. Please upload your chunks.json file.")
     st.stop()
 
 MODEL_PREFERENCES = [
@@ -59,14 +60,20 @@ EXHAUSTIVE_TRIGGERS = (
 )
 
 # =============================================================================
-# BACKEND + MODEL RESOLUTION
+# BACKEND + MODEL RESOLUTION (Embeddings generated on the fly!)
 # =============================================================================
 @st.cache_resource
 def load_backend():
     embedder = SentenceTransformer(EMBED_MODEL)
-    embeddings = np.load("./embeddings/embeddings.npy")
+    
+    # Load the JSON
     with open("./embeddings/chunks.json") as f:
         chunks = json.load(f)
+        
+    # Generate embeddings directly from the text chunks
+    texts = [c["text"] for c in chunks]
+    embeddings = embedder.encode(texts, convert_to_numpy=True)
+    
     groq_client = Groq(api_key=GROQ_API_KEY)
     return embedder, embeddings, chunks, groq_client
 
