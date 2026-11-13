@@ -79,7 +79,7 @@ Like all my RAG projects, this app doesn't just trust the LLM. It features a pos
 
 <div align="center">
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](YOUR_STREAMLIT_URL_HERE)
+[![Open in Streamlit]([https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](YOUR_STREAMLIT_URL_HERE](https://b2b-lead-scoring-rag-kazhjrkrfko5tzneybtycs.streamlit.app/))
 </div>
 
 **Sample questions to try:**
