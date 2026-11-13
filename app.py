@@ -32,7 +32,7 @@ MODEL_PREFERENCES = [
 MODEL_PREFERENCES = [m for m in MODEL_PREFERENCES if m]
 EMBED_MODEL = st.secrets.get("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
-TOP_K = 5  # Increased to 5 to ensure we grab both Tier and Archetype summaries
+TOP_K = 5
 MIN_RAW_SIM = 0.10
 HISTORY_TURNS = 2
 HISTORY_MSG_CHARS = 500
@@ -157,7 +157,7 @@ def retrieve(query: str, top_k: int = TOP_K):
     hints = detect_intents(query)
     effective_k = max(top_k, min(len(hints) + 2, 8))
     
-    is_chart_query = any(kw in query.lower() for kw in ["chart", "plot", "graph"])
+    is_chart_query = any(kw in query.lower() for kw in ["chart", "plot", "graph", "all plots"])
     
     sims = raw_sims.copy()
     for i, c in enumerate(CHUNKS):
@@ -167,6 +167,8 @@ def retrieve(query: str, top_k: int = TOP_K):
         elif c["type"] == "report_page": 
             if not is_chart_query:
                 s = s - REPORT_PENALTY
+            else:
+                s = s + 0.5  # FIX: Massive boost for report pages when asking for charts
         sims[i] = s
         
     top_idx = list(np.argsort(sims)[::-1][:effective_k])
@@ -301,7 +303,7 @@ def _ask_impl(question: str, history: list):
         context = f"META-INSTRUCTION: Refused previous question: '{last_q}'. Explain what specific artifact is missing. Do NOT switch topics."
     else:
         retrieved, raw_max = retrieve(search_q)
-        if not is_visual and not history and raw_max < MIN_RAW_SIM and len(question.split()) > 3: return "The provided model artifacts do not contain this information.", [], False
+        # FIX: Removed the MIN_RAW_SIM auto-refusal block so the LLM can do hypothetical math
         context = "\n\n".join(f"[{c['title']}]\n{sanitize_context(c['text'])}" for c in retrieved)
         hint = _chart_hint(history, question)
         if hint: context = f"CHART CONTEXT: {hint}\n\n{context}"
@@ -332,7 +334,7 @@ def ask(question: str, history=None):
     return _cached_ask(question) if not history and not st.session_state.get("bypass_cache", False) else _ask_impl(question, history)
 
 # =============================================================================
-# PARSER & RENDERER (Added Crash Protection)
+# PARSER & RENDERER (Crash Protection for Empty Charts)
 # =============================================================================
 def _try_parse_chart(raw: str):
     raw = raw.strip()
