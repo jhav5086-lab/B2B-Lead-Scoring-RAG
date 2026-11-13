@@ -7,7 +7,7 @@
   {
     "type": "methodology",
     "title": "Fit Score Calculation Rules",
-    "text": "Fit score is based on: Renewal proximity (25 pts if <=30 days, 20 if <=60, 15 if <=90, 5 if <=180), Premium size (25 pts if >=$2M, 20 if >=$1M, 15 if >=$500K, 10 if >=$100K), Industry fit (15 pts Target, 8 Adjacent, 0 Non-Target), Carrier presence (10 pts for Aetna/UnitedHealth/Cigna), and Broker presence (15 pts)."
+    "text": "Fit score is based on: Renewal proximity (25 pts if <=30 days, 20 if <=60, 15 if <=90, 5 if <=180), Premium size (25 pts if >=$2M, 20 if >=$1M, 15 if >=$500K, 10 if >=$100K), Industry fit (15 pts for Target industries like Healthcare, Technology, Finance, Manufacturing, Professional Services; 8 for Adjacent; 0 for Non-Target), Carrier presence (10 pts for Aetna, UnitedHealth, Cigna), and Broker presence (15 pts)."
   },
   {
     "type": "methodology",
@@ -37,7 +37,7 @@
   {
     "type": "report_page",
     "title": "Archetype Scorecard Summary",
-    "text": "Archetype Counts: Champions = 145, Achievers = 210, Watchers = 350, Dormant Giants = 420, Faders = 500, Lurkers = 750, Detractors = 475. (Note: these are approximate counts for chart generation)."
+    "text": "Archetype Counts: Champions = 145, Achievers = 210, Watchers = 350, Dormant Giants = 420, Faders = 500, Lurkers = 750, Detractors = 475."
   },
   {
     "type": "recommendations",
