@@ -95,7 +95,7 @@ if LLM_MODEL is None:
     st.stop()
 
 # =============================================================================
-# SYSTEM PROMPT (Final Fixes for Math & Meta-Refusals)
+# SYSTEM PROMPT
 # =============================================================================
 SYSTEM_PROMPT = "\n".join([
     "You are a senior RevOps (Revenue Operations) consultant for a B2B sales team.",
