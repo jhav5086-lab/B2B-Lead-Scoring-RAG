@@ -50,7 +50,11 @@ SELF_CHECK_TRIGGERS = (
     "definitely", "always", "never", "guarantee", "means that", "so we should",
 )
 
-META_FOLLOWUPS = ("why", "why?", "explain", "how come", "what do you mean", "what?", "huh", "why not", "why not?", "which", "how", "why can't", "why cant", "explain why")
+META_FOLLOWUPS = (
+    "why", "why?", "explain", "how come", "what do you mean", "what?", "huh", 
+    "why not", "why not?", "which", "how", "why can't", "why cant", "explain why", 
+    "why can't you", "why can't you do that"
+)
 
 EXHAUSTIVE_TRIGGERS = (
     "all plots", "all charts", "every chart", "every plot",
@@ -91,17 +95,19 @@ if LLM_MODEL is None:
     st.stop()
 
 # =============================================================================
-# SYSTEM PROMPT
+# SYSTEM PROMPT (Final Fixes for Math & Meta-Refusals)
 # =============================================================================
 SYSTEM_PROMPT = "\n".join([
     "You are a senior RevOps (Revenue Operations) consultant for a B2B sales team.",
     "",
     "STYLE: 2-4 sentences, direct answer first. Never refuse charts — generate JSON.",
     "",
-    "GREETINGS: If the user just says 'hello', 'hi', or 'what', reply politely. Do NOT add a citation to a greeting.",
+    "CRITICAL EXCEPTIONS TO GROUNDING:",
+    "1. META-INSTRUCTION: If the CONTEXT begins with 'META-INSTRUCTION:', you MUST explain what specific data is missing from the artifacts. Do NOT reply with the standard refusal message. Explain *why* the previous question could not be answered.",
+    "2. CALCULATIONS: If the user provides hypothetical inputs (e.g., 'If an account has X and Y...') and asks you to calculate a score based on the rules in CONTEXT, YOU MUST DO THE MATH. State that the inputs are hypothetical and cite the calculation rules.",
+    "3. GREETINGS: If the user just says 'hello', 'hi', or 'what', reply politely. Do NOT add a citation to a greeting.",
     "",
-    "GROUNDING: use ONLY facts in CONTEXT. If a factual question is not in CONTEXT: reply exactly 'The provided model artifacts do not contain this information.'",
-    "CALCULATIONS: EXCEPTION TO GROUNDING RULE: If the user provides hypothetical inputs (e.g., 'If an account has X and Y...') and asks you to calculate a score based on the rules in CONTEXT, YOU MUST DO THE MATH. State that the inputs are hypothetical and cite the calculation rules.",
+    "GROUNDING: For all other factual questions, use ONLY facts in CONTEXT. If a factual question is not in CONTEXT: reply exactly 'The provided model artifacts do not contain this information.'",
     "",
     "PUSHBACK:",
     "1. Do NOT confirm false premises. If a user claims 'Champions always convert', correct them: High fit + engagement correlates with likelihood, but doesn't guarantee conversion.",
@@ -126,6 +132,7 @@ SYSTEM_PROMPT = "\n".join([
 SELF_CHECK_PROMPT = "\n".join([
     "You are auditing a proposed answer for statistical integrity.",
     "Check for: 1. Confirming false premises. 2. Missing citations. 3. Fabricated numbers.",
+    "DO NOT flag META-EXPLANATIONS or HYPOTHETICAL MATH as hallucinations.",
     "If any failure: REWRITE the answer to fix it. If no failures: return UNCHANGED. Return ONLY the answer text."
 ])
 
@@ -168,7 +175,7 @@ def retrieve(query: str, top_k: int = TOP_K):
             if not is_chart_query:
                 s = s - REPORT_PENALTY
             else:
-                s = s + 0.5  # FIX: Massive boost for report pages when asking for charts
+                s = s + 0.5  # Massive boost for report pages when asking for charts
         sims[i] = s
         
     top_idx = list(np.argsort(sims)[::-1][:effective_k])
@@ -303,7 +310,6 @@ def _ask_impl(question: str, history: list):
         context = f"META-INSTRUCTION: Refused previous question: '{last_q}'. Explain what specific artifact is missing. Do NOT switch topics."
     else:
         retrieved, raw_max = retrieve(search_q)
-        # FIX: Removed the MIN_RAW_SIM auto-refusal block so the LLM can do hypothetical math
         context = "\n\n".join(f"[{c['title']}]\n{sanitize_context(c['text'])}" for c in retrieved)
         hint = _chart_hint(history, question)
         if hint: context = f"CHART CONTEXT: {hint}\n\n{context}"
