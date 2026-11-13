@@ -19,7 +19,6 @@ if not GROQ_API_KEY:
     st.error("🚨 **Missing API Key:** add GROQ_API_KEY to Streamlit secrets.")
     st.stop()
 
-# We ONLY check for chunks.json now. No .npy file needed!
 if not os.path.exists("./embeddings/chunks.json"):
     st.error("🚨 **Missing Files:** could not find ./embeddings/chunks.json. Please upload your chunks.json file.")
     st.stop()
@@ -60,20 +59,15 @@ EXHAUSTIVE_TRIGGERS = (
 )
 
 # =============================================================================
-# BACKEND + MODEL RESOLUTION (Embeddings generated on the fly!)
+# BACKEND + MODEL RESOLUTION
 # =============================================================================
 @st.cache_resource
 def load_backend():
     embedder = SentenceTransformer(EMBED_MODEL)
-    
-    # Load the JSON
     with open("./embeddings/chunks.json") as f:
         chunks = json.load(f)
-        
-    # Generate embeddings directly from the text chunks
     texts = [c["text"] for c in chunks]
     embeddings = embedder.encode(texts, convert_to_numpy=True)
-    
     groq_client = Groq(api_key=GROQ_API_KEY)
     return embedder, embeddings, chunks, groq_client
 
@@ -95,18 +89,17 @@ LLM_MODEL, AVAILABLE_MODELS, MODEL_ERROR = resolve_llm_model(groq_client, tuple(
 
 if LLM_MODEL is None:
     st.error(f"🚨 **No usable LLM model found.** {MODEL_ERROR}")
-    if AVAILABLE_MODELS:
-        st.info("Available models — set `LLM_MODEL` in secrets:\n\n" +
-                "\n".join(f"- `{m}`" for m in AVAILABLE_MODELS))
     st.stop()
 
 # =============================================================================
-# SYSTEM PROMPT (Tailored for B2B Lead Scoring)
+# SYSTEM PROMPT
 # =============================================================================
 SYSTEM_PROMPT = "\n".join([
     "You are a senior RevOps (Revenue Operations) consultant for a B2B sales team.",
     "",
     "STYLE: 2-4 sentences, direct answer first. Never refuse charts — generate JSON.",
+    "",
+    "GREETINGS: If the user just says 'hello', 'hi', or 'what', reply politely. Do NOT add a citation to a greeting.",
     "",
     "GROUNDING: use ONLY facts in CONTEXT. If not in CONTEXT: reply exactly 'The provided model artifacts do not contain this information.'",
     "",
@@ -117,12 +110,12 @@ SYSTEM_PROMPT = "\n".join([
     "TIER LOGIC: Priority MQL requires Score >=70, Premium >=$1M, Engagement >=15, and an active signal. MQL is Score >=50.",
     "ARCHETYPES: Champion (High Fit/Eng/Multi), Achiever (High Fit/Eng/Single), Watcher (High Fit/Mod Eng), Dormant Giant (High Fit/Low Eng), Fader (Low Fit/Mod Eng), Lurker (Low Fit/Low Eng).",
     "",
+    "CHARTS: If asked for 'all plots', generate the three charts listed in the 'Available Charts' chunk: 1. Tier Distribution, 2. SQL Count by Tier, 3. Archetype Distribution.",
+    "",
     "MEMORY: assistant turns include '(Chart N: title — label=value)'. If user references a chart, use history.",
     "CHART REFS: in prose use 'Chart 1' — NEVER square brackets.",
     "",
     "CHART FORMAT: wrap JSON in ```chart ... ```. BOTH keys are REQUIRED: \"type\" AND \"data\". Bar/line/pie: {\"type\": \"bar\", \"data\": [{\"label\": str, \"value\": number}]}.",
-    "",
-    "CAPABILITY QUESTIONS: if user asks 'what can you do', 'what charts', 'what plots' — describe in PROSE only. Do NOT emit chart JSON.",
     "",
     "FILES: cannot produce files. Say 'I can't generate files, but here is a slide-ready content outline:'",
     "",
@@ -131,8 +124,7 @@ SYSTEM_PROMPT = "\n".join([
 
 SELF_CHECK_PROMPT = "\n".join([
     "You are auditing a proposed answer for statistical integrity.",
-    "Check for: 1. Confirming false premises (e.g., 'Score guarantees conversion').",
-    "2. Missing citations. 3. Fabricated numbers.",
+    "Check for: 1. Confirming false premises. 2. Missing citations. 3. Fabricated numbers.",
     "If any failure: REWRITE the answer to fix it. If no failures: return UNCHANGED. Return ONLY the answer text."
 ])
 
@@ -146,7 +138,7 @@ INTENT_KEYWORDS = {
     "recommendations": ["priority", "recommend", "mql", "sql", "tier"],
     "segments": ["segment", "archetype", "champion", "achiever", "watcher", "lurker"],
     "methodology": ["method", "fit score", "engagement", "weight", "calculate"],
-    "model_summary": ["score", "total", "average", "dataset", "rows"],
+    "model_summary": ["score", "total", "average", "dataset", "rows", "plot", "chart"],
 }
 
 ANAPHORA_TOKENS = ("previous", "that chart", "this chart", "the chart", "above", "last one")
