@@ -4,7 +4,7 @@
 
 **An intelligent RevOps chatbot that translates complex account scoring models into actionable sales strategies.**
 
-[![Live Demo](https://img.shields.io/badge/🚀_Live_Demo-Try_it_now-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](YOUR_STREAMLIT_URL_HERE)
+[![Live Demo](https://img.shields.io/badge/🚀_Live_Demo-Try_it_now-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://b2b-lead-scoring-rag-kazhjrkrfko5tzneybtycs.streamlit.app/)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Groq](https://img.shields.io/badge/LLM-Groq-F55036?style=for-the-badge)](https://groq.com/)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
@@ -79,7 +79,7 @@ Like all my RAG projects, this app doesn't just trust the LLM. It features a pos
 
 <div align="center">
 
-[![Open in Streamlit]([https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](YOUR_STREAMLIT_URL_HERE](https://b2b-lead-scoring-rag-kazhjrkrfko5tzneybtycs.streamlit.app/))
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://b2b-lead-scoring-rag-kazhjrkrfko5tzneybtycs.streamlit.app/)
 </div>
 
 **Sample questions to try:**
