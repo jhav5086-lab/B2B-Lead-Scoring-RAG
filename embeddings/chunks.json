@@ -1,0 +1,37 @@
+[
+  {
+    "type": "model_summary",
+    "title": "Lead Scoring Model Overview",
+    "text": "The B2B Lead Scoring Model evaluates 2,375 employers and 125 brokers. It uses a composite score (1-100) calculated as 0.4 * fit_score + 0.6 * account_engagement + 0.8 * broker_bonus. The model outputs a Tier (Priority MQL, MQL, Responder, Disqualified) and an Archetype (Champion, Achiever, Watcher, Dormant Giant, Fader, Lurker, Detractor)."
+  },
+  {
+    "type": "methodology",
+    "title": "Fit Score Calculation Rules",
+    "text": "Fit score is based on: Renewal proximity (25 pts if <=30 days, 20 if <=60, 15 if <=90, 5 if <=180), Premium size (25 pts if >=$2M, 20 if >=$1M, 15 if >=$500K, 10 if >=$100K), Industry fit (15 pts Target, 8 Adjacent, 0 Non-Target), Carrier presence (10 pts for Aetna/UnitedHealth/Cigna), and Broker presence (15 pts)."
+  },
+  {
+    "type": "methodology",
+    "title": "Engagement Score Rules",
+    "text": "Engagement is calculated from email and webinar activities. Email points range from 2 (generic) to 20 (high_intent) with a half-life decay. Webinar points include attendance (5), minutes (up to 5), polls (2), questions (5), and downloads (5). Account engagement = Best contact score + 0.3 * (other contacts) + 10 pt multi-stakeholder bonus if >=2 contacts are engaged."
+  },
+  {
+    "type": "recommendations",
+    "title": "Tiering Definitions",
+    "text": "Priority MQL: Total score >=70, premium >=$1M, engagement >=15, and active signal (urgent renewal, multi-threaded, or broker engaged). MQL: Total score >=50. Responder: Score <50 but has engagement. Disqualified: Lives <50 or competitor domain."
+  },
+  {
+    "type": "segments",
+    "title": "Archetype Definitions",
+    "text": "Champion: High fit (>=60), high engagement (>=40), multi-threaded. Achiever: High fit, high engagement, but single-threaded. Watcher: High fit, moderate engagement (15-40), no high-intent signals. Dormant Giant: High fit, low engagement (<15). Fader: Low fit, moderate engagement (5-15). Lurker: Low fit, low engagement. Detractor: Disqualified."
+  },
+  {
+    "type": "caveats",
+    "title": "Limitations & Caveats",
+    "text": "This is a synthetic dataset. The scoring weights (0.4, 0.6, 0.8) are heuristic and not derived from actual closed-won revenue. A high total score indicates prioritization, not a guarantee of conversion. Archetypes must be validated against real sales cycles."
+  },
+  {
+    "type": "report_page",
+    "title": "Tier Scorecard Summary",
+    "text": "Here is the summary of accounts by tier:\n              accounts  sqls\ntier                        \nDisqualified       475     0\nMQL               1134   498\nPriority MQL       185   117\nResponder          581     0"
+  }
+]
