@@ -32,7 +32,7 @@ MODEL_PREFERENCES = [
 MODEL_PREFERENCES = [m for m in MODEL_PREFERENCES if m]
 EMBED_MODEL = st.secrets.get("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
-TOP_K = 4
+TOP_K = 5  # Increased to 5 to ensure we grab both Tier and Archetype summaries
 MIN_RAW_SIM = 0.10
 HISTORY_TURNS = 2
 HISTORY_MSG_CHARS = 500
@@ -91,7 +91,7 @@ if LLM_MODEL is None:
     st.stop()
 
 # =============================================================================
-# SYSTEM PROMPT (Updated with CALCULATIONS rule)
+# SYSTEM PROMPT
 # =============================================================================
 SYSTEM_PROMPT = "\n".join([
     "You are a senior RevOps (Revenue Operations) consultant for a B2B sales team.",
@@ -100,8 +100,8 @@ SYSTEM_PROMPT = "\n".join([
     "",
     "GREETINGS: If the user just says 'hello', 'hi', or 'what', reply politely. Do NOT add a citation to a greeting.",
     "",
-    "GROUNDING: use ONLY facts in CONTEXT. If not in CONTEXT: reply exactly 'The provided model artifacts do not contain this information.'",
-    "CALCULATIONS: If the user provides hypothetical inputs and asks you to calculate a score based on the rules, DO THE MATH using the formulas in CONTEXT. State that the inputs are hypothetical.",
+    "GROUNDING: use ONLY facts in CONTEXT. If a factual question is not in CONTEXT: reply exactly 'The provided model artifacts do not contain this information.'",
+    "CALCULATIONS: EXCEPTION TO GROUNDING RULE: If the user provides hypothetical inputs (e.g., 'If an account has X and Y...') and asks you to calculate a score based on the rules in CONTEXT, YOU MUST DO THE MATH. State that the inputs are hypothetical and cite the calculation rules.",
     "",
     "PUSHBACK:",
     "1. Do NOT confirm false premises. If a user claims 'Champions always convert', correct them: High fit + engagement correlates with likelihood, but doesn't guarantee conversion.",
@@ -110,7 +110,8 @@ SYSTEM_PROMPT = "\n".join([
     "TIER LOGIC: Priority MQL requires Score >=70, Premium >=$1M, Engagement >=15, and an active signal. MQL is Score >=50.",
     "ARCHETYPES: Champion (High Fit/Eng/Multi), Achiever (High Fit/Eng/Single), Watcher (High Fit/Mod Eng), Dormant Giant (High Fit/Low Eng), Fader (Low Fit/Mod Eng), Lurker (Low Fit/Low Eng).",
     "",
-    "CHARTS: If asked for 'all plots', generate the three charts listed in the 'Available Charts' chunk: 1. Tier Distribution, 2. SQL Count by Tier, 3. Archetype Distribution.",
+    "CHART DATA: Do NOT output an empty chart JSON (e.g., \"data\": []). If the CONTEXT lacks the data to fill a specific chart, DO NOT output that chart block. Just state which data is missing.",
+    "CHARTS: If asked for 'all plots', generate the three charts listed in the 'Available Charts' chunk (Tier Distribution, SQL Count by Tier, Archetype Distribution).",
     "",
     "MEMORY: assistant turns include '(Chart N: title — label=value)'. If user references a chart, use history.",
     "CHART REFS: in prose use 'Chart 1' — NEVER square brackets.",
@@ -135,10 +136,10 @@ USER_TEMPLATE = "CONTEXT CHUNKS:\n{context}\n\nUSER QUESTION: {question}\n\nGrou
 # =============================================================================
 INTENT_KEYWORDS = {
     "caveats": ["limitation", "caveat", "risk", "guarantee", "convert"],
-    "recommendations": ["priority", "recommend", "mql", "sql", "tier"],
-    "segments": ["segment", "archetype", "champion", "achiever", "watcher", "lurker"],
+    "recommendations": ["priority", "recommend", "mql", "sql", "tier", "plot", "chart"],
+    "segments": ["segment", "archetype", "champion", "achiever", "watcher", "lurker", "plot", "chart"],
     "methodology": ["method", "fit score", "engagement", "weight", "calculate"],
-    "model_summary": ["score", "total", "average", "dataset", "rows", "plot", "chart"],
+    "model_summary": ["score", "total", "average", "dataset", "rows", "plot", "chart", "distribution"],
 }
 
 ANAPHORA_TOKENS = ("previous", "that chart", "this chart", "the chart", "above", "last one")
@@ -156,7 +157,6 @@ def retrieve(query: str, top_k: int = TOP_K):
     hints = detect_intents(query)
     effective_k = max(top_k, min(len(hints) + 2, 8))
     
-    # FIX: Do not penalize report pages if the user is asking for a chart
     is_chart_query = any(kw in query.lower() for kw in ["chart", "plot", "graph"])
     
     sims = raw_sims.copy()
@@ -332,7 +332,7 @@ def ask(question: str, history=None):
     return _cached_ask(question) if not history and not st.session_state.get("bypass_cache", False) else _ask_impl(question, history)
 
 # =============================================================================
-# PARSER & RENDERER
+# PARSER & RENDERER (Added Crash Protection)
 # =============================================================================
 def _try_parse_chart(raw: str):
     raw = raw.strip()
@@ -342,8 +342,14 @@ def _try_parse_chart(raw: str):
     if "data" not in data:
         for alias in ("rows", "items", "values"):
             if alias in data: data["data"] = data.pop(alias); break
+    
     if "data" not in data: return None
     if "type" not in data: data["type"] = "bar"
+    
+    # SAFETY: Reject empty chart data arrays
+    if not isinstance(data["data"], list) or not data["data"]:
+        return None
+        
     for row in data["data"]:
         if "label" not in row and "name" in row: row["label"] = row.pop("name")
         if "value" not in row and "count" in row: row["value"] = row.pop("count")
@@ -391,6 +397,11 @@ def _pie_is_valid(values) -> bool:
 
 def render_chart(chart_data):
     df = pd.DataFrame(chart_data["data"])
+    
+    # SAFETY: Do not try to sort an empty dataframe
+    if df.empty or "value" not in df.columns:
+        return
+        
     chart_type = chart_data.get("type", "bar").lower()
     if chart_type == "pie" and not _pie_is_valid(df["value"].tolist()): chart_type = "bar"
     if chart_type in ("bar", "line"): df = df.sort_values("value", ascending=False).reset_index(drop=True)
