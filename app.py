@@ -123,7 +123,7 @@ SYSTEM_PROMPT = "\n".join([
     "TIER LOGIC: Priority MQL requires Score >=70, Premium >=$1M, Engagement >=15, and an active signal. MQL is Score >=50.",
     "ARCHETYPES: Champion (High Fit/Eng/Multi), Achiever (High Fit/Eng/Single), Watcher (High Fit/Mod Eng), Dormant Giant (High Fit/Low Eng), Fader (Low Fit/Mod Eng), Lurker (Low Fit/Low Eng). If CONTEXT lists any other archetype names, use the names exactly as CONTEXT gives them and never invent new ones.",
     "",
-    "DERIVED FIGURES: Never estimate or round a total. If a total is not written in CONTEXT, add up the exact counts listed in CONTEXT and label the result '(calculated)', naming the inputs. If a line starting with 'CALCULATION' appears in CONTEXT, use that value and do not recompute it. If CHART CONTEXT states a 'Total of all values', use it as the denominator for percentages and never guess a different total.",
+    "DERIVED FIGURES: Never estimate or round a total. If a total is not written in CONTEXT, add up the exact counts listed in CONTEXT and label the result '(calculated)', naming the inputs. If a line starting with 'CALCULATION' appears in CONTEXT, use that value and do not recompute it. If CHART CONTEXT states a 'Total of all values', use it as the denominator for percentages and never guess a different total. If it lists 'Shares of total', use those percentages exactly instead of recalculating.",
     "COMPOSITE SCORE: it is always the weighted formula in CONTEXT (never a plain sum of Fit and Engagement).",
     "",
     "CHART DATA: Do NOT output an empty chart JSON (e.g., \"data\": []). If the CONTEXT lacks the data to fill a specific chart, DO NOT output that chart block. Just state which data is missing.",
@@ -289,12 +289,17 @@ def _get_chart_back(question: str) -> tuple:
     return back, []
 
 def _chart_total_note(chart: dict) -> str:
-    vals = [d.get("value") for d in chart.get("data", []) if isinstance(d.get("value"), (int, float))]
-    if len(vals) < 2:
+    """Total and per-item shares computed in code, so the LLM copies them instead of doing the arithmetic."""
+    items = [(d.get("label"), d.get("value")) for d in chart.get("data", [])
+             if isinstance(d.get("value"), (int, float))]
+    if len(items) < 2:
         return ""
-    total = sum(vals)
+    total = sum(v for _, v in items)
+    if total <= 0:
+        return ""
     txt = f"{int(total):,}" if float(total).is_integer() else f"{total:g}"
-    return f" Total of all values = {txt} (calculated)."
+    shares = ", ".join(f"{label} {v / total * 100:.1f}%" for label, v in items)
+    return f" Total of all values = {txt} (calculated). Shares of total (calculated): {shares}."
 
 def _chart_hint(all_charts: list, question: str) -> str:
     """Only adds chart memory when the question actually refers to an earlier chart."""
@@ -425,8 +430,12 @@ def verify_numbers(answer: str, retrieved: list, question: str = "") -> list:
 
     for m in NUM_PATTERN.finditer(answer):
         raw = m.group(0)
-        if not _in_context(raw, ctx_nums):
-            unverified.append(raw)
+        if _in_context(raw, ctx_nums):
+            continue
+        is_pct = answer[m.end():m.end() + 3].lstrip().startswith("%")
+        if is_pct and _derived_pct_ok(raw, ctx_nums):  # e.g. 47.75% = 1,134 / 2,375
+            continue
+        unverified.append(raw)
 
     if not _is_hypothetical(question):  # hypothetical math produces new numbers on purpose
         for pat in LOOSE_PATTERNS:
