@@ -2,6 +2,7 @@ import re
 import json
 import os
 import time
+import difflib
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -152,10 +153,33 @@ def _clean(s: str) -> str:
     """Lower-case and strip everything except letters, digits and spaces."""
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", (s or "").lower())).strip()
 
-GREETING_RE = re.compile(r"(hi+|hello+|hey+|yo|good (morning|afternoon|evening)|thanks|thank you)( there)?")
+GREETING_RE = re.compile(r"(h+e+l+o+|h+i+|h+e+y+|yo|good (morning|afternoon|evening))( there)?")
+THANKS_RE = re.compile(r"(thanks|thank you|thx|ty)( a lot| so much)?")
+FAREWELL_RE = re.compile(r"(bye+|goodbye|good bye|see you|see ya|cya|good night)( for now)?")
+LEADIN_RE = re.compile(r"i (have|got) (a|one|another) (quick )?(question|query)")
 
-def _is_greeting(q: str) -> bool:
-    return bool(GREETING_RE.fullmatch(_clean(q)))
+_FUZZY_WORDS = {"hello": "greet", "hiya": "greet", "thanks": "thanks", "goodbye": "bye"}
+
+def _fuzzy_kind(c: str):
+    """Single-word typos like 'helo' or 'hellw'. Needs >= 4 letters so real words are not caught by accident."""
+    if len(c.split()) != 1 or not (4 <= len(c) <= 9):
+        return None
+    m = difflib.get_close_matches(c, list(_FUZZY_WORDS), n=1, cutoff=0.75)
+    return _FUZZY_WORDS[m[0]] if m else None
+
+def _smalltalk_reply(q: str):
+    """Canned replies for greetings, thanks, goodbyes and 'I have a question' lead-ins (no retrieval, no LLM call)."""
+    c = _clean(q)
+    kind = _fuzzy_kind(c)
+    if GREETING_RE.fullmatch(c) or kind == "greet":
+        return "Hello! How can I help you with your lead scoring model today?"
+    if THANKS_RE.fullmatch(c) or kind == "thanks":
+        return "You're welcome!"
+    if FAREWELL_RE.fullmatch(c) or kind == "bye":
+        return "Goodbye! Come back any time you have questions about your lead scoring model."
+    if LEADIN_RE.fullmatch(c):
+        return "Sure, go ahead and ask your question."
+    return None
 
 def _is_hypothetical(q: str) -> bool:
     ql = q.lower()
@@ -195,7 +219,10 @@ INTENT_KEYWORDS = {
     "model_summary": ["score", "total", "average", "dataset", "rows", "plot", "chart", "distribution"],
 }
 
-ANAPHORA_TOKENS = ("previous", "that chart", "this chart", "the chart", "above", "last one")
+ANAPHORA_TOKENS = (
+    "previous", "that chart", "this chart", "the chart", "above", "last one",
+    "slice", "which bar", "the bar", "that bar", "this bar",
+)
 
 def detect_intents(query: str) -> set:
     q = query.lower()
@@ -288,7 +315,11 @@ def build_search_query(question: str, history: list, all_charts: list) -> str:
     back, explicit_refs = _get_chart_back(question)
     q_lower = question.lower().strip()
     if len(question.split()) < 4 or any(t in q_lower for t in ANAPHORA_TOKENS) or explicit_refs:
-        recent = " ".join(m.get("content", "") for m in history[-6:] if m.get("role") == "user").strip()
+        recent = " ".join(
+            m.get("content", "")
+            for m in history[-6:]
+            if m.get("role") == "user" and not _smalltalk_reply(m.get("content", ""))
+        ).strip()
         return (_chart_hint(all_charts, question) + " " + recent + " " + question).strip()
     return question
 
@@ -297,6 +328,8 @@ def sanitize_context(text: str) -> str:
 
 def normalize_citations(text: str) -> str:
     text = re.sub(r"\(Source:\s*([^)]+)\)", r"[\1]", text)
+    text = re.sub(r"\u3010([^\u3011]*)\u3011", r"[\1]", text)   # 【Title】 -> [Title]
+    text = re.sub(r"\s*\[CALCULATION\]", "", text)               # the code-computed line is not a source
     return text.strip()
 
 # =============================================================================
@@ -465,8 +498,8 @@ def _ask_impl(question: str, history: list, all_charts: list = None):
     """Returns (answer, retrieved, is_visual). RAISES on LLM failure so errors are never cached."""
     all_charts = all_charts or []
 
-    if _is_greeting(question):
-        reply = "You're welcome!" if _clean(question).startswith("thank") else "Hello! How can I help you with your lead scoring model today?"
+    reply = _smalltalk_reply(question)
+    if reply:
         return reply, [], False
 
     search_q = build_search_query(question, history, all_charts)
