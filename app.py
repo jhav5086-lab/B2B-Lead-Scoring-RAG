@@ -33,28 +33,32 @@ MODEL_PREFERENCES = [m for m in MODEL_PREFERENCES if m]
 EMBED_MODEL = st.secrets.get("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 TOP_K = 5
-MIN_RAW_SIM = 0.10
-HISTORY_TURNS = 2
-HISTORY_MSG_CHARS = 500
-MAX_TOKENS_DEFAULT = 800
-MAX_TOKENS_VISUAL = 2000
-MAX_TOKENS_EXHAUSTIVE = 3500
+MIN_RAW_SIM = 0.10            # only used when the query has no domain keywords at all
+HISTORY_TURNS = 2             # number of user/assistant exchanges sent to the LLM
+HISTORY_MSG_CHARS = 600       # per-message text limit (chart memory lines are added after this cut)
+MAX_TOKENS_DEFAULT = 1200     # gpt-oss reasoning tokens count against this budget
+MAX_TOKENS_VISUAL = 2500
+MAX_TOKENS_EXHAUSTIVE = 4000
 INTENT_BOOST_MULT = 2.0
 INTENT_BOOST_ADD = 0.20
 REPORT_PENALTY = 0.15
-MAX_RETRIES = 2
-MAX_WAIT_SECONDS = 120
+MAX_RETRIES = 2               # retries on HTTP 429
+MAX_WAIT_SECONDS = 120        # upper bound for a single wait between retries
+
+REFUSAL = "The provided model artifacts do not contain this information."
+QUOTE_CHARS = "\"'\u201c\u201d\u2018\u2019"
 
 SELF_CHECK_TRIGGERS = (
     "confirm", "prove", "proves", "right?", "correct?", "is that true",
     "definitely", "always", "never", "guarantee", "means that", "so we should",
 )
 
-META_FOLLOWUPS = (
-    "why", "why?", "explain", "how come", "what do you mean", "what?", "huh", 
-    "why not", "why not?", "which", "how", "why can't", "why cant", "explain why", 
-    "why can't you", "why can't you do that"
+# Matched against a punctuation-stripped, lower-cased question (see _is_meta_followup)
+META_PATTERN = re.compile(
+    r"\b(why|explain|how come|what do you mean|whats missing|what is missing|huh|which)\b"
 )
+
+HYPOTHETICAL_TRIGGERS = ("suppose", "hypothetical", "if an account", "what if", "assume", "imagine")
 
 EXHAUSTIVE_TRIGGERS = (
     "all plots", "all charts", "every chart", "every plot",
@@ -103,18 +107,20 @@ SYSTEM_PROMPT = "\n".join([
     "STYLE: 2-4 sentences, direct answer first. Never refuse charts — generate JSON.",
     "",
     "CRITICAL EXCEPTIONS TO GROUNDING:",
-    "1. META-INSTRUCTION: If the CONTEXT begins with 'META-INSTRUCTION:', you MUST explain what specific data is missing from the artifacts. Do NOT reply with the standard refusal message. Explain *why* the previous question could not be answered.",
-    "2. CALCULATIONS: If the user provides hypothetical inputs (e.g., 'If an account has X and Y...') and asks you to calculate a score based on the rules in CONTEXT, YOU MUST DO THE MATH. State that the inputs are hypothetical and cite the calculation rules.",
-    "3. GREETINGS: If the user just says 'hello', 'hi', or 'what', reply politely. Do NOT add a citation to a greeting.",
+    "1. META-INSTRUCTION: If the CONTEXT begins with 'META-INSTRUCTION:', you MUST explain what specific data is missing from the artifacts. Do NOT reply with the standard refusal message and do NOT add citations. Explain *why* the previous question could not be answered, and say what the artifacts DO cover.",
+    "2. CALCULATIONS: If the user provides hypothetical inputs (e.g., 'If an account has X and Y...') and asks you to calculate a score based on the rules in CONTEXT, YOU MUST DO THE MATH. Begin by stating that the inputs are hypothetical, then show the formula and cite the calculation rules.",
+    "3. GREETINGS: If the user just says 'hello' or 'hi', reply politely. Do NOT add a citation to a greeting.",
     "",
-    "GROUNDING: For all other factual questions, use ONLY facts in CONTEXT. If a factual question is not in CONTEXT: reply exactly 'The provided model artifacts do not contain this information.'",
+    "GROUNDING: For all other factual questions, use ONLY facts in CONTEXT. Do NOT add reasons, rationale, or business explanations that are not written in CONTEXT. If a factual question is not answered by CONTEXT: reply exactly '" + REFUSAL + "'",
     "",
     "PUSHBACK:",
     "1. Do NOT confirm false premises. If a user claims 'Champions always convert', correct them: High fit + engagement correlates with likelihood, but doesn't guarantee conversion.",
-    "2. If the user states a score that contradicts CONTEXT, CORRECT it: 'That figure differs from the artifacts; the correct value is X.'",
+    "2. If the user states a score or threshold that contradicts CONTEXT, CORRECT it: 'That figure differs from the artifacts; the correct value is X.'",
     "",
     "TIER LOGIC: Priority MQL requires Score >=70, Premium >=$1M, Engagement >=15, and an active signal. MQL is Score >=50.",
-    "ARCHETYPES: Champion (High Fit/Eng/Multi), Achiever (High Fit/Eng/Single), Watcher (High Fit/Mod Eng), Dormant Giant (High Fit/Low Eng), Fader (Low Fit/Mod Eng), Lurker (Low Fit/Low Eng).",
+    "ARCHETYPES: Champion (High Fit/Eng/Multi), Achiever (High Fit/Eng/Single), Watcher (High Fit/Mod Eng), Dormant Giant (High Fit/Low Eng), Fader (Low Fit/Mod Eng), Lurker (Low Fit/Low Eng). If CONTEXT lists any other archetype names, use the names exactly as CONTEXT gives them and never invent new ones.",
+    "",
+    "DERIVED FIGURES: If you compute a percentage or total that is not written in CONTEXT, label it '(calculated)' and name the inputs.",
     "",
     "CHART DATA: Do NOT output an empty chart JSON (e.g., \"data\": []). If the CONTEXT lacks the data to fill a specific chart, DO NOT output that chart block. Just state which data is missing.",
     "CHARTS: If asked for 'all plots', generate the three charts listed in the 'Available Charts' chunk (Tier Distribution, SQL Count by Tier, Archetype Distribution).",
@@ -122,21 +128,44 @@ SYSTEM_PROMPT = "\n".join([
     "MEMORY: assistant turns include '(Chart N: title — label=value)'. If user references a chart, use history.",
     "CHART REFS: in prose use 'Chart 1' — NEVER square brackets.",
     "",
-    "CHART FORMAT: wrap JSON in ```chart ... ```. BOTH keys are REQUIRED: \"type\" AND \"data\". Bar/line/pie: {\"type\": \"bar\", \"data\": [{\"label\": str, \"value\": number}]}.",
+    "CHART FORMAT: wrap JSON in ```chart ... ```. ALL of \"type\", \"title\" and \"data\" are REQUIRED. Bar/line/pie: {\"type\": \"bar\", \"title\": \"Tier Distribution\", \"data\": [{\"label\": str, \"value\": number}]}.",
     "",
     "FILES: cannot produce files. Say 'I can't generate files, but here is a slide-ready content outline:'",
     "",
-    "CITATIONS: after each factual sentence add [Chunk Title]."
+    "CITATIONS: after each factual sentence add [Chunk Title]. Use only titles that appear in CONTEXT."
 ])
 
 SELF_CHECK_PROMPT = "\n".join([
     "You are auditing a proposed answer for statistical integrity.",
-    "Check for: 1. Confirming false premises. 2. Missing citations. 3. Fabricated numbers.",
+    "Check for: 1. Confirming false premises. 2. Missing citations. 3. Fabricated numbers or unsupported reasoning.",
     "DO NOT flag META-EXPLANATIONS or HYPOTHETICAL MATH as hallucinations.",
-    "If any failure: REWRITE the answer to fix it. If no failures: return UNCHANGED. Return ONLY the answer text."
+    "If any failure: REWRITE the answer to fix it. If no failures: return the answer text exactly as given. Return ONLY the answer text."
 ])
 
 USER_TEMPLATE = "CONTEXT CHUNKS:\n{context}\n\nUSER QUESTION: {question}\n\nGrounded answer with [Title] citations (or Chart JSON if requested):"
+
+# =============================================================================
+# TEXT HELPERS
+# =============================================================================
+def _clean(s: str) -> str:
+    """Lower-case and strip everything except letters, digits and spaces."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", (s or "").lower())).strip()
+
+GREETING_RE = re.compile(r"(hi+|hello+|hey+|yo|good (morning|afternoon|evening)|thanks|thank you)( there)?")
+
+def _is_greeting(q: str) -> bool:
+    return bool(GREETING_RE.fullmatch(_clean(q)))
+
+def _is_hypothetical(q: str) -> bool:
+    ql = q.lower()
+    return any(t in ql for t in HYPOTHETICAL_TRIGGERS) or ("calculate" in ql and bool(re.search(r"\d", ql)))
+
+def _is_meta_followup(q: str) -> bool:
+    c = _clean(q)
+    return 0 < len(c.split()) <= 8 and bool(META_PATTERN.search(c))
+
+def _fmt_points(chart: dict, limit: int = 8) -> str:
+    return ", ".join(f"{d.get('label')}={d.get('value')}" for d in chart.get("data", [])[:limit])
 
 # =============================================================================
 # INTENT & RETRIEVAL
@@ -160,54 +189,72 @@ def retrieve(query: str, top_k: int = TOP_K):
     q_emb = q_emb / (np.linalg.norm(q_emb) + 1e-9)
     raw_sims = EMBEDDINGS_NORM @ q_emb
     raw_max = float(np.max(raw_sims))
-    
+
     hints = detect_intents(query)
     effective_k = max(top_k, min(len(hints) + 2, 8))
-    
+
     is_chart_query = any(kw in query.lower() for kw in ["chart", "plot", "graph", "all plots"])
-    
+
     sims = raw_sims.copy()
     for i, c in enumerate(CHUNKS):
         s = float(raw_sims[i])
-        if c["type"] in hints: 
+        if c["type"] in hints:
             s = s * INTENT_BOOST_MULT + INTENT_BOOST_ADD
-        elif c["type"] == "report_page": 
+        elif c["type"] == "report_page":
             if not is_chart_query:
                 s = s - REPORT_PENALTY
             else:
-                s = s + 0.5  # Massive boost for report pages when asking for charts
+                s = s + 0.5  # strong boost for report pages when asking for charts
         sims[i] = s
-        
+
     top_idx = list(np.argsort(sims)[::-1][:effective_k])
-    results = [{"title": CHUNKS[i]["title"], "type": CHUNKS[i]["type"], "text": CHUNKS[i]["text"], "score": float(sims[i]), "raw_score": float(raw_sims[i])} for i in top_idx]
+    results = [
+        {
+            "title": CHUNKS[i]["title"],
+            "type": CHUNKS[i]["type"],
+            "text": CHUNKS[i]["text"],
+            "score": float(sims[i]),
+            "raw_score": float(raw_sims[i]),
+        }
+        for i in top_idx
+    ]
     return results, raw_max
 
 def _get_chart_back(question: str) -> tuple:
     q = question.lower()
     explicit = re.findall(r"chart\s+(\d+)", q)
-    if explicit: return 0, [int(n) for n in explicit]
+    if explicit:
+        return 0, [int(n) for n in explicit]
     back = 0
     for phrase, n in [("previous to previous", 2), ("previous", 1), ("last chart", 1), ("that chart", 1)]:
-        if phrase in q and n > back: back = n
+        if phrase in q and n > back:
+            back = n
     return back, []
 
-def _chart_hint(history: list, question: str) -> str:
-    back, explicit_refs = _get_chart_back(question)
-    charts = [c for m in history for c in (m.get("charts") or [])]
-    if not charts: return ""
-    
-    if explicit_refs:
+def _chart_hint(all_charts: list, question: str) -> str:
+    """Only adds chart memory when the question actually refers to an earlier chart."""
+    if not all_charts:
+        return ""
+    back, refs = _get_chart_back(question)
+    q = question.lower()
+    if not (refs or back or any(t in q for t in ANAPHORA_TOKENS)):
+        return ""
+
+    by_num = {c.get("number"): c for c in all_charts if c.get("number") is not None}
+
+    if refs:
         hints = []
-        for n in explicit_refs:
-            idx = n - 1
-            if 0 <= idx < len(charts):
-                c = charts[idx]
-                hints.append(f"Chart {n} ('{c.get('title')}'): {', '.join(f'{d.get('label')}={d.get('value')}' for d in c.get('data', [])[:10])}")
+        for n in refs:
+            c = by_num.get(n)
+            if c:
+                hints.append(f"Chart {n} ('{c.get('title')}'): {_fmt_points(c, 10)}")
         return "Referring to | " + " | ".join(hints) if hints else ""
-        
-    if back <= 0 or back > len(charts): target = charts[-1]; prefix = "Most recent: "
-    else: target = charts[-back]; prefix = f"Chart {len(charts)-back+1}: "
-    return f"{prefix}'{target.get('title')}' with data: {', '.join(f'{d.get('label')}={d.get('value')}' for d in target.get('data', [])[:8])}."
+
+    if 1 <= back <= len(all_charts):
+        target = all_charts[-back]
+    else:
+        target = all_charts[-1]
+    return f"Chart {target.get('number', '?')} ('{target.get('title')}'): {_fmt_points(target)}."
 
 def _last_was_refusal(history: list) -> bool:
     for m in reversed(history):
@@ -215,18 +262,21 @@ def _last_was_refusal(history: list) -> bool:
             return "not contain this information" in (m.get("content") or "").lower()
     return False
 
-def build_search_query(question: str, history: list) -> str:
-    if not history: return question
-    q_lower = question.lower().strip()
-    if _last_was_refusal(history) and q_lower in META_FOLLOWUPS: return ""
-    
+def build_search_query(question: str, history: list, all_charts: list) -> str:
+    if not history:
+        return question
+    if _last_was_refusal(history) and _is_meta_followup(question):
+        return ""  # signals META mode
+
     back, explicit_refs = _get_chart_back(question)
+    q_lower = question.lower().strip()
     if len(question.split()) < 4 or any(t in q_lower for t in ANAPHORA_TOKENS) or explicit_refs:
         recent = " ".join(m.get("content", "") for m in history[-6:] if m.get("role") == "user").strip()
-        return (_chart_hint(history, question) + " " + recent + " " + question).strip()
+        return (_chart_hint(all_charts, question) + " " + recent + " " + question).strip()
     return question
 
-def sanitize_context(text: str) -> str: return text.replace("|", "\u00a6")
+def sanitize_context(text: str) -> str:
+    return text.replace("|", "\u00a6")
 
 def normalize_citations(text: str) -> str:
     text = re.sub(r"\(Source:\s*([^)]+)\)", r"[\1]", text)
@@ -235,24 +285,87 @@ def normalize_citations(text: str) -> str:
 # =============================================================================
 # VERIFICATION
 # =============================================================================
-NUM_PATTERN = re.compile(r'\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b|\b\d+\.\d{2,}\b|\b\d{5,}\b')
+NUMTOK = r"(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+
+# Strict pattern: big / precise numbers anywhere in the answer
+NUM_PATTERN = re.compile(r"\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b|\b\d+\.\d{2,}\b|\b\d{5,}\b")
+
+# Loose patterns: small numbers, but only when they sit next to a scoring word, a unit or a percent sign
+LOOSE_PATTERNS = [
+    re.compile(r"(?<![\d,.])" + NUMTOK + r"\s*%"),
+    re.compile(r"(?<![\d,.])" + NUMTOK + r"\s*(?:accounts?|SQLs?|MQLs?|points?)\b", re.I),
+    re.compile(r"\b(?:score|engagement|bonus|threshold)\b[^.\d\n]{0,20}?" + NUMTOK, re.I),
+]
+
 def _extract_nums(text: str) -> set:
     out = set()
-    for n in re.findall(r'\d{1,3}(?:,\d{3})+|\d+\.\d+|\d+', text):
-        try: out.add(round(float(n.replace(',', '')), 4))
-        except: pass
+    for n in re.findall(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\d+", text):
+        try:
+            out.add(round(float(n.replace(",", "")), 4))
+        except ValueError:
+            pass
     return out
 
-def verify_numbers(answer: str, retrieved: list) -> list:
+def _with_scaled(nums: set) -> set:
+    """Add thousand/million-scaled variants so '$1M' matches '1,000,000'."""
+    extra = set()
+    for n in nums:
+        if n >= 1e6:
+            extra.add(round(n / 1e6, 4))
+        if n >= 1e3:
+            extra.add(round(n / 1e3, 4))
+    return nums | extra
+
+def _decimals(raw: str) -> int:
+    return len(raw.split(".")[1]) if "." in raw else 0
+
+def _in_context(raw: str, ctx_nums: set) -> bool:
+    try:
+        v = float(raw.replace(",", ""))
+    except ValueError:
+        return True
+    d = _decimals(raw)
+    return any(round(c, d) == round(v, d) for c in ctx_nums)
+
+def _derived_pct_ok(raw: str, ctx_nums: set) -> bool:
+    """A percentage is accepted if it equals the ratio of two numbers found in the context."""
+    try:
+        pct = float(raw.replace(",", ""))
+    except ValueError:
+        return True
+    tol = 0.5 * (10 ** -_decimals(raw)) + 1e-9
+    nums = [n for n in sorted(ctx_nums) if n > 0][:200]
+    for a in nums:
+        for b in nums:
+            if b >= a and abs(a / b * 100 - pct) <= tol:
+                return True
+    return False
+
+def verify_numbers(answer: str, retrieved: list, question: str = "") -> list:
     ctx_nums = set()
-    for c in retrieved: ctx_nums |= _extract_nums(c["text"])
+    for c in retrieved:
+        ctx_nums |= _extract_nums(c["text"])
+    ctx_nums |= _extract_nums(question)  # numbers supplied by the user are not hallucinations
+    ctx_nums = _with_scaled(ctx_nums)
+
     unverified = []
+
     for m in NUM_PATTERN.finditer(answer):
         raw = m.group(0)
-        try: v = round(float(raw.replace(',', '')), 4)
-        except: continue
-        decimals = len(raw.split('.')[1]) if '.' in raw else 0
-        if not any(round(c, decimals) == round(v, decimals) for c in ctx_nums): unverified.append(raw)
+        if not _in_context(raw, ctx_nums):
+            unverified.append(raw)
+
+    if not _is_hypothetical(question):  # hypothetical math produces new numbers on purpose
+        for pat in LOOSE_PATTERNS:
+            for m in pat.finditer(answer):
+                raw = m.group(1)
+                if _in_context(raw, ctx_nums):
+                    continue
+                is_pct = answer[m.end(1):m.end(1) + 3].lstrip().startswith("%")
+                if is_pct and _derived_pct_ok(raw, ctx_nums):
+                    continue
+                unverified.append(raw)
+
     return unverified
 
 def _norm_title(t: str) -> str:
@@ -262,18 +375,24 @@ def verify_citations(answer: str, retrieved: list) -> list:
     titles = {_norm_title(c["title"]) for c in retrieved}
     bad = []
     for cite in re.findall(r"\[([^\]\[]+?)\]", answer):
-        if "{" in cite or "}" in cite or '"' in cite or cite.lower().startswith("chart"): continue
-        if _norm_title(cite) not in titles: bad.append(cite)
+        if "{" in cite or "}" in cite or '"' in cite or cite.lower().startswith("chart"):
+            continue
+        if _norm_title(cite) not in titles:
+            bad.append(cite)
     return bad
 
-def apply_verification(text: str, retrieved: list) -> str:
-    if not text or not retrieved or text.strip() == "The provided model artifacts do not contain this information.": return text
+def apply_verification(text: str, retrieved: list, question: str = "") -> str:
+    if not text or not retrieved or text.strip() == REFUSAL:
+        return text
     warnings = []
-    unverified = verify_numbers(text, retrieved)
-    if unverified: warnings.append(f"⚠️ **Unverified figures:** {', '.join(sorted(set(unverified)))}")
+    unverified = verify_numbers(text, retrieved, question)
+    if unverified:
+        warnings.append(f"⚠️ **Unverified figures:** {', '.join(sorted(set(unverified)))}")
     bad = verify_citations(text, retrieved)
-    if bad: warnings.append(f"⚠️ **Uncited sources:** {', '.join(f'[{b}]' for b in sorted(set(bad)))}")
-    if warnings: return text + "\n\n> " + "  \n> ".join(warnings)
+    if bad:
+        warnings.append(f"⚠️ **Uncited sources:** {', '.join('[' + b + ']' for b in sorted(set(bad)))}")
+    if warnings:
+        return text + "\n\n> " + "  \n> ".join(warnings)
     return text
 
 # =============================================================================
@@ -287,107 +406,196 @@ def _track_usage(resp):
         st.session_state.usage["calls"] += 1
 
 def _groq_call(messages, max_tok):
-    for attempt in range(3):
+    # gpt-oss models spend part of max_tokens on hidden reasoning; keep it short
+    extra = {"reasoning_effort": "low"} if LLM_MODEL.startswith("openai/gpt-oss") else {}
+    for attempt in range(MAX_RETRIES + 1):
         try:
-            resp = groq_client.chat.completions.create(model=LLM_MODEL, messages=messages, temperature=0.2, max_tokens=max_tok)
-            _track_usage(resp); return resp
+            resp = groq_client.chat.completions.create(
+                model=LLM_MODEL, messages=messages, temperature=0.2, max_tokens=max_tok, **extra
+            )
+            _track_usage(resp)
+            return resp
         except Exception as e:
-            if "429" in str(e) and attempt < 2: time.sleep(30); continue
+            msg = str(e).lower()
+            if extra and "reasoning" in msg:  # model/API rejected the parameter: retry without it
+                extra = {}
+                continue
+            if "429" in msg and attempt < MAX_RETRIES:
+                time.sleep(min(30, MAX_WAIT_SECONDS))
+                continue
             raise
-    raise Exception("Max retries reached")
+    raise RuntimeError("Max retries reached")
 
-def _needs_self_check(q: str) -> bool: return any(tok in q.lower() for tok in SELF_CHECK_TRIGGERS)
-def _is_exhaustive(q: str) -> bool: return any(tok in q.lower() for tok in EXHAUSTIVE_TRIGGERS)
+def _needs_self_check(q: str) -> bool:
+    return any(tok in q.lower() for tok in SELF_CHECK_TRIGGERS)
 
-def _ask_impl(question: str, history: list):
-    search_q = build_search_query(question, history)
+def _is_exhaustive(q: str) -> bool:
+    return any(tok in q.lower() for tok in EXHAUSTIVE_TRIGGERS)
+
+def _history_messages(history: list) -> list:
+    out = []
+    for m in history:
+        text = (m.get("content") or "")[:HISTORY_MSG_CHARS]
+        for c in m.get("charts") or []:
+            text += f"\n(Chart {c.get('number', '?')}: {c.get('title') or 'Untitled'} — {_fmt_points(c)})"
+        if text:
+            out.append({"role": m["role"], "content": text})
+    return out
+
+def _ask_impl(question: str, history: list, all_charts: list = None):
+    """Returns (answer, retrieved, is_visual). RAISES on LLM failure so errors are never cached."""
+    all_charts = all_charts or []
+
+    if _is_greeting(question):
+        reply = "You're welcome!" if _clean(question).startswith("thank") else "Hello! How can I help you with your lead scoring model today?"
+        return reply, [], False
+
+    search_q = build_search_query(question, history, all_charts)
     is_visual = any(kw in question.lower() for kw in ["chart", "plot", "graph"])
     retrieved = []
     meta_mode = (search_q == "")
 
     if meta_mode:
         last_q = next((m.get("content", "") for m in reversed(history) if m.get("role") == "user"), "")
-        context = f"META-INSTRUCTION: Refused previous question: '{last_q}'. Explain what specific artifact is missing. Do NOT switch topics."
+        context = (
+            f"META-INSTRUCTION: The assistant refused the previous question: '{last_q}'. "
+            "Explain what specific information is missing from the artifacts and what the artifacts do cover. "
+            "Do NOT switch topics and do NOT add citations."
+        )
     else:
         retrieved, raw_max = retrieve(search_q)
+        # Off-topic guard: nothing in the query looks like our domain AND nothing is similar to any chunk
+        if raw_max < MIN_RAW_SIM and not detect_intents(search_q):
+            return REFUSAL, [], False
         context = "\n\n".join(f"[{c['title']}]\n{sanitize_context(c['text'])}" for c in retrieved)
-        hint = _chart_hint(history, question)
-        if hint: context = f"CHART CONTEXT: {hint}\n\n{context}"
+        hint = _chart_hint(all_charts, question)
+        if hint:
+            context = f"CHART CONTEXT: {hint}\n\n{context}"
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for m in history:
-        content = m.get("content") or ""
-        if m.get("charts"):
-            content += "\n" + "\n".join(f"(Chart {i}: {c.get('title')} — {', '.join(f'{d.get('label')}={d.get('value')}' for d in c.get('data', [])[:8])})" for i, c in enumerate(m["charts"], 1))
-        if content: messages.append({"role": m["role"], "content": content[:HISTORY_MSG_CHARS]})
+    messages += _history_messages(history)
     messages.append({"role": "user", "content": USER_TEMPLATE.format(context=context, question=question)})
 
-    max_tok = MAX_TOKENS_EXHAUSTIVE if _is_exhaustive(question) else (MAX_TOKENS_VISUAL if is_visual else MAX_TOKENS_DEFAULT)
-    try: answer = _groq_call(messages, max_tok).choices[0].message.content or ""
-    except Exception as e: return f"LLM error: {e}", [], False
+    if _is_exhaustive(question):
+        max_tok = MAX_TOKENS_EXHAUSTIVE
+    elif is_visual:
+        max_tok = MAX_TOKENS_VISUAL
+    else:
+        max_tok = MAX_TOKENS_DEFAULT
+
+    answer = _groq_call(messages, max_tok).choices[0].message.content or ""
+    if not answer.strip():
+        raise RuntimeError("The model returned an empty answer (its token budget may have been used up). Please try again.")
 
     if _needs_self_check(question) and not is_visual and not meta_mode:
         try:
-            check = _groq_call([{"role": "system", "content": SELF_CHECK_PROMPT}, {"role": "user", "content": f"Q:\n{question}\n\nA:\n{answer}\n\nC:\n{context[:4000]}"}], max_tok)
-            if check.choices[0].message.content.strip(): answer = check.choices[0].message.content
-        except: pass
+            check = _groq_call(
+                [
+                    {"role": "system", "content": SELF_CHECK_PROMPT},
+                    {"role": "user", "content": f"Q:\n{question}\n\nA:\n{answer}\n\nC:\n{context[:4000]}"},
+                ],
+                max_tok,
+            )
+            checked = (check.choices[0].message.content or "").strip()
+            if checked and checked.upper() != "UNCHANGED":
+                answer = checked
+        except Exception:
+            pass  # keep the original answer if the audit pass fails
+
     return normalize_citations(answer), retrieved, is_visual
 
 @st.cache_data(ttl=3600, max_entries=50, show_spinner=False)
-def _cached_ask(question: str): return _ask_impl(question, [])
-def ask(question: str, history=None):
-    if history is None: history = []
-    return _cached_ask(question) if not history and not st.session_state.get("bypass_cache", False) else _ask_impl(question, history)
+def _cached_ask(question: str):
+    # An exception raised here is NOT cached by Streamlit, so a transient 429 will not stick for an hour.
+    return _ask_impl(question, [], [])
+
+def ask(question: str, history=None, all_charts=None):
+    """Returns (answer, retrieved, is_visual, error_message_or_None)."""
+    history = history or []
+    try:
+        if not history and not st.session_state.get("bypass_cache", False):
+            answer, retrieved, is_visual = _cached_ask(question)
+        else:
+            answer, retrieved, is_visual = _ask_impl(question, history, all_charts or [])
+        return answer, retrieved, is_visual, None
+    except Exception as e:
+        return "", [], False, str(e)
 
 # =============================================================================
-# PARSER & RENDERER (Crash Protection for Empty Charts)
+# PARSER & RENDERER
 # =============================================================================
 def _try_parse_chart(raw: str):
     raw = raw.strip()
-    if not raw.startswith("{") or not raw.endswith("}"): return None
-    try: data = json.loads(raw)
-    except: return None
+    if not raw.startswith("{") or not raw.endswith("}"):
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
     if "data" not in data:
         for alias in ("rows", "items", "values"):
-            if alias in data: data["data"] = data.pop(alias); break
-    
-    if "data" not in data: return None
-    if "type" not in data: data["type"] = "bar"
-    
-    # SAFETY: Reject empty chart data arrays
+            if alias in data:
+                data["data"] = data.pop(alias)
+                break
+
+    if "data" not in data:
+        return None
+    if "type" not in data:
+        data["type"] = "bar"
+
+    # Reject empty or malformed data arrays
     if not isinstance(data["data"], list) or not data["data"]:
         return None
-        
+
     for row in data["data"]:
-        if "label" not in row and "name" in row: row["label"] = row.pop("name")
-        if "value" not in row and "count" in row: row["value"] = row.pop("count")
-        try: row["value"] = float(row["value"])
-        except: return None
+        if not isinstance(row, dict):
+            return None
+        if "label" not in row and "name" in row:
+            row["label"] = row.pop("name")
+        if "value" not in row and "count" in row:
+            row["value"] = row.pop("count")
+        try:
+            v = float(row["value"])
+        except Exception:
+            return None
+        row["value"] = int(v) if v.is_integer() else v
     return data
 
 def _find_matching_brace(text: str, start: int) -> int:
-    if start >= len(text) or text[start] != "{": return -1
+    if start >= len(text) or text[start] != "{":
+        return -1
     depth, i, in_string, escape = 0, start, False, False
     while i < len(text):
         c = text[i]
-        if escape: escape = False
-        elif c == "\\": escape = True
-        elif c == '"': in_string = not in_string
+        if escape:
+            escape = False
+        elif c == "\\":
+            escape = True
+        elif c == '"':
+            in_string = not in_string
         elif not in_string:
-            if c == "{": depth += 1
+            if c == "{":
+                depth += 1
             elif c == "}":
                 depth -= 1
-                if depth == 0: return i
+                if depth == 0:
+                    return i
         i += 1
     return -1
 
 def parse_response(answer: str):
     charts, clean_text = [], answer
-    fenced = re.compile(r'```(?:chart|json)?\s*\n?([\s\S]*?)```', re.MULTILINE)
+    fenced = re.compile(r"```(?:chart|json)?\s*\n?([\s\S]*?)```", re.MULTILINE)
+
     def _replace(m):
         d = _try_parse_chart(m.group(1))
-        if d: charts.append(d); return ""
+        if d:
+            charts.append(d)
+            return ""
         return m.group(0)
+
     clean_text = fenced.sub(_replace, clean_text)
     i = 0
     while i < len(clean_text):
@@ -395,32 +603,46 @@ def parse_response(answer: str):
             end = _find_matching_brace(clean_text, i)
             if end != -1:
                 d = _try_parse_chart(clean_text[i:end + 1])
-                if d: charts.append(d); clean_text = clean_text[:i] + clean_text[end + 1:]; continue
+                if d:
+                    charts.append(d)
+                    clean_text = clean_text[:i] + clean_text[end + 1:]
+                    continue
         i += 1
     return clean_text.strip(), charts
 
 def _pie_is_valid(values) -> bool:
-    s = sum([float(v) for v in values if v is not None])
+    s = sum(float(v) for v in values if v is not None)
     return 50 <= s <= 105 or (0.9 <= s <= 1.1)
 
 def render_chart(chart_data):
     df = pd.DataFrame(chart_data["data"])
-    
-    # SAFETY: Do not try to sort an empty dataframe
     if df.empty or "value" not in df.columns:
         return
-        
-    chart_type = chart_data.get("type", "bar").lower()
-    if chart_type == "pie" and not _pie_is_valid(df["value"].tolist()): chart_type = "bar"
-    if chart_type in ("bar", "line"): df = df.sort_values("value", ascending=False).reset_index(drop=True)
 
+    chart_type = chart_data.get("type", "bar").lower()
+    if chart_type == "pie" and not _pie_is_valid(df["value"].tolist()):
+        chart_type = "bar"
+    if chart_type == "bar":  # only bars are re-sorted; lines keep the model's order (time/tier order)
+        df = df.sort_values("value", ascending=False).reset_index(drop=True)
+
+    order = df["label"].tolist()
     if chart_type == "pie":
-        c = alt.Chart(df).mark_arc(innerRadius=50).encode(theta="value:Q", color=alt.Color("label:N", title="Category"), tooltip=["label", "value"])
+        c = alt.Chart(df).mark_arc(innerRadius=50).encode(
+            theta="value:Q", color=alt.Color("label:N", title="Category"), tooltip=["label", "value"]
+        )
     elif chart_type == "line":
-        c = alt.Chart(df).mark_line(point=True).encode(x=alt.X("label:N", sort=df["label"].tolist(), axis=alt.Axis(labelAngle=-45)), y="value:Q", tooltip=["label", "value"])
+        c = alt.Chart(df).mark_line(point=True).encode(
+            x=alt.X("label:N", sort=order, axis=alt.Axis(labelAngle=-45)), y="value:Q", tooltip=["label", "value"]
+        )
     else:
-        c = alt.Chart(df).mark_bar().encode(x=alt.X("label:N", sort=df["label"].tolist(), axis=alt.Axis(labelAngle=-45)), y="value:Q", tooltip=["label", "value"])
-    st.altair_chart(c.properties(title=chart_data.get("title", "Chart")), use_container_width=True)
+        c = alt.Chart(df).mark_bar().encode(
+            x=alt.X("label:N", sort=order, axis=alt.Axis(labelAngle=-45)), y="value:Q", tooltip=["label", "value"]
+        )
+
+    title = chart_data.get("title") or "Chart"
+    if chart_data.get("number") is not None and not str(title).lower().startswith("chart"):
+        title = f"Chart {chart_data['number']}: {title}"
+    st.altair_chart(c.properties(title=title), use_container_width=True)
 
 # =============================================================================
 # UI
@@ -428,38 +650,73 @@ def render_chart(chart_data):
 st.title("🎯 B2B Lead Scoring RAG")
 st.caption("Ask questions about Fit Scores, Engagement, Archetypes, and Tiers.")
 
-if "messages" not in st.session_state: st.session_state.messages = []
-if "usage" not in st.session_state: st.session_state.usage = {"total": 0, "calls": 0}
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "usage" not in st.session_state:
+    st.session_state.usage = {"total": 0, "calls": 0}
 
 with st.sidebar:
     st.session_state.bypass_cache = st.checkbox("Force fresh response", value=False)
-    if st.button("Clear chat"): st.session_state.messages = []; st.cache_data.clear(); st.rerun()
+    if st.button("Clear chat"):
+        st.session_state.messages = []
+        st.cache_data.clear()
+        st.rerun()
     st.markdown(f"**LLM:** `{LLM_MODEL}`")
     st.markdown(f"**Tokens used:** {st.session_state.usage['total']:,}")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        if msg.get("content"): st.markdown(msg["content"])
+        if msg.get("content"):
+            st.markdown(msg["content"])
         if msg.get("charts"):
-            for c in msg["charts"]: render_chart(c)
+            for c in msg["charts"]:
+                render_chart(c)
         if msg.get("sources"):
             with st.expander(f"Sources ({len(msg['sources'])})"):
-                for s in msg["sources"]: st.markdown(f"**{s['title']}** — raw cosine {s.get('raw_score', 0.0):.3f}")
+                for s in msg["sources"]:
+                    st.markdown(f"**{s['title']}** — raw cosine {s.get('raw_score', 0.0):.3f}")
 
 def process(q: str):
-    history = st.session_state.messages[-4:]
-    st.session_state.messages.append({"role": "user", "content": q})
-    with st.chat_message("user"): st.markdown(q)
+    q = q.strip().strip(QUOTE_CHARS).strip()  # pasted prompts often arrive wrapped in quotes
+    if not q:
+        return
+
+    history = st.session_state.messages[-(2 * HISTORY_TURNS):]
+    all_charts = [c for m in st.session_state.messages for c in (m.get("charts") or [])]
+
+    with st.chat_message("user"):
+        st.markdown(q)
+
     with st.chat_message("assistant"):
         with st.spinner("Analyzing..."):
-            raw, retrieved, _ = ask(q, history=history)
-            clean, charts = parse_response(raw)
-            clean = apply_verification(clean, retrieved)
-            if clean: st.markdown(clean)
-            for c in charts: render_chart(c)
-            if retrieved:
-                with st.expander(f"Sources ({len(retrieved)})"):
-                    for c in retrieved: st.markdown(f"**{c['title']}** — raw cosine {c.get('raw_score', 0.0):.3f}")
-            st.session_state.messages.append({"role": "assistant", "content": clean, "charts": charts, "sources": retrieved})
+            raw, retrieved, _, error = ask(q, history=history, all_charts=all_charts)
 
-if user_q := st.chat_input("Ask about Priority MQLs, Champions, or Fit Scores..."): process(user_q)
+        if error:
+            # Do not store failed turns, so the question can simply be re-sent
+            st.error(f"⚠️ Something went wrong: {error}")
+            return
+
+        clean, charts = parse_response(raw)
+        clean = apply_verification(clean, retrieved, q)
+
+        next_n = len(all_charts) + 1
+        for c in charts:
+            c["number"] = next_n
+            if not c.get("title"):
+                c["title"] = f"Chart {next_n}"
+            next_n += 1
+
+        if clean:
+            st.markdown(clean)
+        for c in charts:
+            render_chart(c)
+        if retrieved:
+            with st.expander(f"Sources ({len(retrieved)})"):
+                for c in retrieved:
+                    st.markdown(f"**{c['title']}** — raw cosine {c.get('raw_score', 0.0):.3f}")
+
+    st.session_state.messages.append({"role": "user", "content": q})
+    st.session_state.messages.append({"role": "assistant", "content": clean, "charts": charts, "sources": retrieved})
+
+if user_q := st.chat_input("Ask about Priority MQLs, Champions, or Fit Scores..."):
+    process(user_q)
