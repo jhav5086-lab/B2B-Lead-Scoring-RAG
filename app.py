@@ -47,6 +47,7 @@ MAX_RETRIES = 2               # retries on HTTP 429
 MAX_WAIT_SECONDS = 120        # upper bound for a single wait between retries
 
 REFUSAL = "The provided model artifacts do not contain this information."
+EVAL_FILE = "./eval_cases.json"   # optional: enables the eval suite button in the sidebar
 QUOTE_CHARS = "\"'\u201c\u201d\u2018\u2019"
 
 SELF_CHECK_TRIGGERS = (
@@ -570,11 +571,11 @@ def _cached_ask(question: str):
     # An exception raised here is NOT cached by Streamlit, so a transient 429 will not stick for an hour.
     return _ask_impl(question, [], [])
 
-def ask(question: str, history=None, all_charts=None):
+def ask(question: str, history=None, all_charts=None, fresh: bool = False):
     """Returns (answer, retrieved, is_visual, error_message_or_None)."""
     history = history or []
     try:
-        if not history and not st.session_state.get("bypass_cache", False):
+        if not history and not fresh and not st.session_state.get("bypass_cache", False):
             answer, retrieved, is_visual = _cached_ask(question)
         else:
             answer, retrieved, is_visual = _ask_impl(question, history, all_charts or [])
@@ -705,6 +706,138 @@ def render_chart(chart_data):
     st.altair_chart(c.properties(title=title), use_container_width=True)
 
 # =============================================================================
+# TURN RUNNER & EVAL SUITE
+# =============================================================================
+def run_turn(q: str, messages: list, fresh: bool = False) -> dict:
+    """One full chat turn (retrieve, answer, parse, verify). Used by the chat UI and by the eval suite."""
+    history = messages[-(2 * HISTORY_TURNS):]
+    all_charts = [c for m in messages for c in (m.get("charts") or [])]
+
+    raw, retrieved, _, error = ask(q, history=history, all_charts=all_charts, fresh=fresh)
+    if error:
+        return {"error": error}
+
+    clean, charts = parse_response(raw)
+    if charts:  # drop lines that are only a bare citation, left over after the chart JSON was removed
+        clean = re.sub(r"(?m)^\s*\[[^\]]+\]\s*$\n?", "", clean).strip()
+
+    # Follow-ups ("which slice is biggest?") legitimately rely on the previous turn's sources and charts,
+    # so verify against those too; otherwise correct answers get false warnings.
+    prev_sources = [s for m in history for s in (m.get("sources") or [])]
+    chart_pool = [
+        {
+            "title": c.get("title") or "",
+            "text": _fmt_points(c, 50),
+            "total": sum(float(d.get("value", 0) or 0) for d in c.get("data", [])),
+        }
+        for c in all_charts
+    ]
+    clean = apply_verification(clean, retrieved + prev_sources + chart_pool, q)
+
+    next_n = len(all_charts) + 1
+    for c in charts:
+        c["number"] = next_n
+        if not c.get("title"):
+            c["title"] = f"Chart {next_n}"
+        next_n += 1
+
+    return {"error": None, "clean": clean, "charts": charts, "retrieved": retrieved}
+
+def _norm_eval(s: str) -> str:
+    """Lower-case, straighten quotes/dashes and drop thousands separators so '1,134' matches '1134'."""
+    s = (s or "").lower()
+    for a, b in (("\u2019", "'"), ("\u2018", "'"), ("\u2011", "-"), ("\u2010", "-"),
+                 ("\u2013", "-"), ("\u2014", "-"), ("\u00a0", " ")):
+        s = s.replace(a, b)
+    s = re.sub(r"(?<=\d),(?=\d{3})", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+def check_turn(res: dict, checks: dict) -> list:
+    """Returns a list of failure messages (empty list = all checks passed)."""
+    fails = []
+    full = res.get("clean", "") or ""
+    body = _norm_eval(full.split("\n\n> \u26a0")[0])   # answer text without the ⚠️ banner
+    charts = res.get("charts", []) or []
+
+    if "exact" in checks and body != _norm_eval(checks["exact"]):
+        fails.append("answer is not the exact expected text")
+    if "starts_with" in checks and not body.startswith(_norm_eval(checks["starts_with"])):
+        fails.append(f"answer should start with: {checks['starts_with'][:50]}")
+    for s in checks.get("contains_all", []):
+        if _norm_eval(s) not in body:
+            fails.append(f"missing '{s}'")
+    any_list = checks.get("contains_any", [])
+    if any_list and not any(_norm_eval(s) in body for s in any_list):
+        fails.append(f"none of these found: {any_list}")
+    for s in checks.get("not_contains", []):
+        if _norm_eval(s) in body:
+            fails.append(f"should not contain '{s}'")
+    if "charts_min" in checks and len(charts) < checks["charts_min"]:
+        fails.append(f"expected at least {checks['charts_min']} chart(s), got {len(charts)}")
+    if checks.get("charts_titled"):
+        untitled = [c for c in charts if re.fullmatch(r"chart \d+", _norm_eval(c.get("title", "")))]
+        if untitled:
+            fails.append(f"{len(untitled)} chart(s) have no real title")
+    if "chart_type" in checks and not any(str(c.get("type", "")).lower() == checks["chart_type"] for c in charts):
+        fails.append(f"no '{checks['chart_type']}' chart returned")
+    if checks.get("no_warning") and "\u26a0" in full:
+        fails.append("answer carries a ⚠️ warning banner")
+    if checks.get("no_sources") and res.get("retrieved"):
+        fails.append("retrieval ran but should have been skipped")
+    if checks.get("cites") and not re.search(r"\[[^\]]+\]", body):
+        fails.append("no [Title] citation found")
+    return fails
+
+def run_eval(cases: list, on_progress=None) -> list:
+    """Runs every case in a fresh conversation (no cache) and checks each turn's answer."""
+    results = []
+    for i, case in enumerate(cases, 1):
+        if on_progress:
+            on_progress(i - 1, len(cases), case["id"])
+        messages, problems, last_q, last_a, status = [], [], "", "", "PASS"
+        for n, turn in enumerate(case["turns"], 1):
+            q = turn["q"].strip()
+            last_q = q
+            try:
+                res = run_turn(q, messages, fresh=True)
+            except Exception as e:
+                res = {"error": str(e)}
+            if res.get("error"):
+                status = "ERROR"
+                problems.append(f"turn {n}: {res['error']}")
+                break
+            messages.append({"role": "user", "content": q})
+            messages.append({"role": "assistant", "content": res["clean"],
+                             "charts": res["charts"], "sources": res["retrieved"]})
+            last_a = res["clean"]
+            for f in check_turn(res, turn.get("checks", {})):
+                problems.append(f"turn {n}: {f}")
+        if status != "ERROR" and problems:
+            status = "FAIL"
+        results.append({"id": case["id"], "name": case.get("name", ""), "status": status,
+                        "problems": problems, "question": last_q, "answer": last_a})
+    if on_progress:
+        on_progress(len(cases), len(cases), "done")
+    return results
+
+def show_eval_results(results: list):
+    passed = sum(1 for r in results if r["status"] == "PASS")
+    st.subheader(f"{passed}/{len(results)} passed")
+    df = pd.DataFrame([
+        {"id": r["id"], "status": r["status"], "problems": "; ".join(r["problems"])[:160]} for r in results
+    ])
+    st.dataframe(df, use_container_width=True)
+    for r in results:
+        if r["status"] != "PASS":
+            with st.expander(f"❌ {r['id']} ({r['status']}): {r['name']}"):
+                st.markdown("**Problems:**\n" + "\n".join(f"- {p}" for p in r["problems"]))
+                st.markdown(f"**Last question:** {r['question']}")
+                st.markdown("**Answer:**")
+                st.markdown(r["answer"] or "_(no answer)_")
+    st.download_button("Download results (JSON)", json.dumps(results, indent=2, ensure_ascii=False),
+                       "eval_results.json", "application/json")
+
+# =============================================================================
 # UI
 # =============================================================================
 st.title("🎯 B2B Lead Scoring RAG")
@@ -715,6 +848,7 @@ if "messages" not in st.session_state:
 if "usage" not in st.session_state:
     st.session_state.usage = {"total": 0, "calls": 0}
 
+run_eval_clicked = False
 with st.sidebar:
     st.session_state.bypass_cache = st.checkbox("Force fresh response", value=False)
     if st.button("Clear chat"):
@@ -723,6 +857,23 @@ with st.sidebar:
         st.rerun()
     st.markdown(f"**LLM:** `{LLM_MODEL}`")
     st.markdown(f"**Tokens used:** {st.session_state.usage['total']:,}")
+    if os.path.exists(EVAL_FILE):
+        st.divider()
+        run_eval_clicked = st.button("🧪 Run eval suite")
+        st.caption("Runs every test in eval_cases.json. Takes a few minutes and uses tokens.")
+
+if run_eval_clicked:
+    with open(EVAL_FILE, encoding="utf-8") as f:
+        _cases = json.load(f)
+    _bar = st.progress(0.0, text="Starting eval...")
+    def _tick(i, n, cid):
+        _bar.progress(i / n, text=f"Running {cid} ({i}/{n})")
+    st.session_state.eval_results = run_eval(_cases, _tick)
+    _bar.empty()
+
+if st.session_state.get("eval_results"):
+    with st.expander("🧪 Eval results", expanded=True):
+        show_eval_results(st.session_state.eval_results)
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -741,45 +892,19 @@ def process(q: str):
     if not q:
         return
 
-    history = st.session_state.messages[-(2 * HISTORY_TURNS):]
-    all_charts = [c for m in st.session_state.messages for c in (m.get("charts") or [])]
-
     with st.chat_message("user"):
         st.markdown(q)
 
     with st.chat_message("assistant"):
         with st.spinner("Analyzing..."):
-            raw, retrieved, _, error = ask(q, history=history, all_charts=all_charts)
+            res = run_turn(q, st.session_state.messages)
 
-        if error:
+        if res.get("error"):
             # Do not store failed turns, so the question can simply be re-sent
-            st.error(f"⚠️ Something went wrong: {error}")
+            st.error(f"⚠️ Something went wrong: {res['error']}")
             return
 
-        clean, charts = parse_response(raw)
-        if charts:  # drop lines that are only a bare citation, left over after the chart JSON was removed
-            clean = re.sub(r"(?m)^\s*\[[^\]]+\]\s*$\n?", "", clean).strip()
-
-        # Follow-ups ("which slice is biggest?") legitimately rely on the previous turn's sources and charts,
-        # so verify against those too; otherwise correct answers get false warnings.
-        prev_sources = [s for m in history for s in (m.get("sources") or [])]
-        chart_pool = [
-            {
-                "title": c.get("title") or "",
-                "text": _fmt_points(c, 50),
-                "total": sum(float(d.get("value", 0) or 0) for d in c.get("data", [])),
-            }
-            for c in all_charts
-        ]
-        clean = apply_verification(clean, retrieved + prev_sources + chart_pool, q)
-
-        next_n = len(all_charts) + 1
-        for c in charts:
-            c["number"] = next_n
-            if not c.get("title"):
-                c["title"] = f"Chart {next_n}"
-            next_n += 1
-
+        clean, charts, retrieved = res["clean"], res["charts"], res["retrieved"]
         if clean:
             st.markdown(clean)
         for c in charts:
