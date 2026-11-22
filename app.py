@@ -120,7 +120,8 @@ SYSTEM_PROMPT = "\n".join([
     "TIER LOGIC: Priority MQL requires Score >=70, Premium >=$1M, Engagement >=15, and an active signal. MQL is Score >=50.",
     "ARCHETYPES: Champion (High Fit/Eng/Multi), Achiever (High Fit/Eng/Single), Watcher (High Fit/Mod Eng), Dormant Giant (High Fit/Low Eng), Fader (Low Fit/Mod Eng), Lurker (Low Fit/Low Eng). If CONTEXT lists any other archetype names, use the names exactly as CONTEXT gives them and never invent new ones.",
     "",
-    "DERIVED FIGURES: If you compute a percentage or total that is not written in CONTEXT, label it '(calculated)' and name the inputs.",
+    "DERIVED FIGURES: Never estimate or round a total. If a total is not written in CONTEXT, add up the exact counts listed in CONTEXT and label the result '(calculated)', naming the inputs. If a line starting with 'CALCULATION' appears in CONTEXT, use that value and do not recompute it.",
+    "COMPOSITE SCORE: it is always the weighted formula in CONTEXT (never a plain sum of Fit and Engagement).",
     "",
     "CHART DATA: Do NOT output an empty chart JSON (e.g., \"data\": []). If the CONTEXT lacks the data to fill a specific chart, DO NOT output that chart block. Just state which data is missing.",
     "CHARTS: If asked for 'all plots', generate the three charts listed in the 'Available Charts' chunk (Tier Distribution, SQL Count by Tier, Archetype Distribution).",
@@ -163,6 +164,22 @@ def _is_hypothetical(q: str) -> bool:
 def _is_meta_followup(q: str) -> bool:
     c = _clean(q)
     return 0 < len(c.split()) <= 8 and bool(META_PATTERN.search(c))
+
+def _parse_hypothetical(q: str):
+    """For 'Suppose an account has Fit 50, Engagement 30...' questions, compute the composite in code.
+    The weights below MUST match the formula in chunks.json (0.4 fit, 0.6 engagement, 0.8 broker bonus)."""
+    if not _is_hypothetical(q):
+        return None
+    ql = q.lower()
+    num = r"(\d+(?:\.\d+)?)"
+    fit = re.search(r"\bfit(?: score)?\s*(?:of|is|=|:)?\s*" + num, ql)
+    eng = re.search(r"\bengagement(?: score)?\s*(?:of|is|=|:)?\s*" + num, ql)
+    if not (fit and eng):
+        return None
+    bonus = re.search(r"broker bonus\s*(?:of|is|=|:)?\s*" + num, ql)
+    f, e = float(fit.group(1)), float(eng.group(1))
+    b = float(bonus.group(1)) if bonus else 0.0
+    return f, e, b, round(0.4 * f + 0.6 * e + 0.8 * b, 2)
 
 def _fmt_points(chart: dict, limit: int = 8) -> str:
     return ", ".join(f"{d.get('label')}={d.get('value')}" for d in chart.get("data", [])[:limit])
@@ -345,6 +362,8 @@ def verify_numbers(answer: str, retrieved: list, question: str = "") -> list:
     ctx_nums = set()
     for c in retrieved:
         ctx_nums |= _extract_nums(c["text"])
+        if c.get("total") is not None:  # e.g. the sum of a chart's values (a legitimate derived total)
+            ctx_nums.add(round(float(c["total"]), 4))
     ctx_nums |= _extract_nums(question)  # numbers supplied by the user are not hallucinations
     ctx_nums = _with_scaled(ctx_nums)
 
@@ -463,11 +482,20 @@ def _ask_impl(question: str, history: list, all_charts: list = None):
             "Do NOT switch topics and do NOT add citations."
         )
     else:
+        calc = _parse_hypothetical(question)
+        if calc:  # make sure the formula and tier-threshold chunks are retrieved
+            search_q += " composite score formula weights fit engagement broker bonus tier thresholds"
         retrieved, raw_max = retrieve(search_q)
         # Off-topic guard: nothing in the query looks like our domain AND nothing is similar to any chunk
         if raw_max < MIN_RAW_SIM and not detect_intents(search_q):
             return REFUSAL, [], False
         context = "\n\n".join(f"[{c['title']}]\n{sanitize_context(c['text'])}" for c in retrieved)
+        if calc:
+            f, e, b, score = calc
+            context = (
+                f"CALCULATION (computed in code; use this value, do not recompute): "
+                f"composite = 0.4 x {f:g} + 0.6 x {e:g} + 0.8 x {b:g} = {score:g}\n\n" + context
+            )
         hint = _chart_hint(all_charts, question)
         if hint:
             context = f"CHART CONTEXT: {hint}\n\n{context}"
@@ -620,8 +648,7 @@ def render_chart(chart_data):
         return
 
     chart_type = chart_data.get("type", "bar").lower()
-    if chart_type == "pie" and not _pie_is_valid(df["value"].tolist()):
-        chart_type = "bar"
+    # Pie charts of raw counts are valid (Altair normalises theta), so a pie request is honoured as-is
     if chart_type == "bar":  # only bars are re-sorted; lines keep the model's order (time/tier order)
         df = df.sort_values("value", ascending=False).reset_index(drop=True)
 
@@ -697,7 +724,21 @@ def process(q: str):
             return
 
         clean, charts = parse_response(raw)
-        clean = apply_verification(clean, retrieved, q)
+        if charts:  # drop lines that are only a bare citation, left over after the chart JSON was removed
+            clean = re.sub(r"(?m)^\s*\[[^\]]+\]\s*$\n?", "", clean).strip()
+
+        # Follow-ups ("which slice is biggest?") legitimately rely on the previous turn's sources and charts,
+        # so verify against those too; otherwise correct answers get false warnings.
+        prev_sources = [s for m in history for s in (m.get("sources") or [])]
+        chart_pool = [
+            {
+                "title": c.get("title") or "",
+                "text": _fmt_points(c, 50),
+                "total": sum(float(d.get("value", 0) or 0) for d in c.get("data", [])),
+            }
+            for c in all_charts
+        ]
+        clean = apply_verification(clean, retrieved + prev_sources + chart_pool, q)
 
         next_n = len(all_charts) + 1
         for c in charts:
