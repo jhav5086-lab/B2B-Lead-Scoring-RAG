@@ -121,7 +121,7 @@ SYSTEM_PROMPT = "\n".join([
     "2. If the user states a score or threshold that contradicts CONTEXT, CORRECT it: 'That figure differs from the artifacts; the correct value is X.'",
     "",
     "TIER LOGIC: Priority MQL requires Score >=70, Premium >=$1M, Engagement >=15, and an active signal. MQL is Score >=50.",
-    "ARCHETYPES: Champion (High Fit/Eng/Multi), Achiever (High Fit/Eng/Single), Watcher (High Fit/Mod Eng), Dormant Giant (High Fit/Low Eng), Fader (Low Fit/Mod Eng), Lurker (Low Fit/Low Eng). If CONTEXT lists any other archetype names, use the names exactly as CONTEXT gives them and never invent new ones.",
+    "ARCHETYPES: Champion (High Fit/Eng/Multi), Achiever (High Fit/Eng/Single), Watcher (High Fit/Mod Eng), Dormant Giant (High Fit/Low Eng), Fader (Low Fit/Mod Eng), Lurker (Low Fit/Low Eng), Detractor (Disqualified). If CONTEXT lists any other archetype names, use the names exactly as CONTEXT gives them and never invent new ones.",
     "",
     "DERIVED FIGURES: Never estimate or round a total. If a total is not written in CONTEXT, add up the exact counts listed in CONTEXT and label the result '(calculated)', naming the inputs. If a line starting with 'CALCULATION' appears in CONTEXT, use that value and do not recompute it. If CHART CONTEXT states a 'Total of all values', use it as the denominator for percentages and never guess a different total. If it lists 'Shares of total', use those percentages exactly instead of recalculating.",
     "COMPOSITE SCORE: it is always the weighted formula in CONTEXT (never a plain sum of Fit and Engagement).",
@@ -355,8 +355,23 @@ def sanitize_context(text: str) -> str:
 def normalize_citations(text: str) -> str:
     text = re.sub(r"\(Source:\s*([^)]+)\)", r"[\1]", text)
     text = re.sub(r"\u3010([^\u3011]*)\u3011", r"[\1]", text)   # 【Title】 -> [Title]
-    text = re.sub(r"\s*\[CALCULATION\]", "", text)               # the code-computed line is not a source
+    text = re.sub(r"\s*\[(?:CALCULATION|CHART CONTEXT)[^\]]*\]", "", text)  # code-provided context is not a source
+    text = re.sub(r"\[(Chart \d+)\]", r"\1", text)                          # [Chart 1] -> Chart 1
     return text.strip()
+
+def _has_real_citation(text: str) -> bool:
+    """True if the text cites at least one [Chunk Title] (chart references like [Chart 1] do not count)."""
+    return any(not c.strip().lower().startswith("chart") for c in re.findall(r"\[([^\[\]]+?)\]", text))
+
+def _ensure_composite_shown(answer: str, calc) -> str:
+    """For hypothetical questions, guarantee the code-computed composite appears in the answer."""
+    if not calc:
+        return answer
+    f, e, b, score = calc
+    txt = f"{score:g}"
+    if re.search(r"(?<![\d.])" + re.escape(txt) + r"(?![\d])", answer):
+        return answer
+    return f"Hypothetical inputs: composite = 0.4 \u00d7 {f:g} + 0.6 \u00d7 {e:g} + 0.8 \u00d7 {b:g} = {txt}.\n\n" + answer
 
 # =============================================================================
 # VERIFICATION
@@ -539,6 +554,7 @@ def _ask_impl(question: str, history: list, all_charts: list = None):
     is_visual = any(kw in question.lower() for kw in ["chart", "plot", "graph"])
     retrieved = []
     meta_mode = (search_q == "")
+    calc, hint = None, ""
 
     if meta_mode:
         last_q = next((m.get("content", "") for m in reversed(history) if m.get("role") == "user"), "")
@@ -559,7 +575,7 @@ def _ask_impl(question: str, history: list, all_charts: list = None):
         if calc:
             f, e, b, score = calc
             context = (
-                f"CALCULATION (computed in code; use this value, do not recompute): "
+                f"CALCULATION (use this exact value; do not recompute; do not cite this line; say the inputs are hypothetical and show the composite): "
                 f"composite = 0.4 x {f:g} + 0.6 x {e:g} + 0.8 x {b:g} = {score:g}\n\n" + context
             )
         hint = _chart_hint(all_charts, question)
@@ -596,7 +612,32 @@ def _ask_impl(question: str, history: list, all_charts: list = None):
         except Exception:
             pass  # keep the original answer if the audit pass fails
 
-    return normalize_citations(answer), retrieved, is_visual
+    answer = normalize_citations(answer)
+
+    # Grounding repair: a factual answer with no real [Title] citation is rewritten once, strictly from CONTEXT.
+    # (Skipped for chart follow-ups, hypotheticals, charts, refusals and file-request outlines.)
+    if (retrieved and not meta_mode and not is_visual and not calc and not hint
+            and answer.strip() != REFUSAL and "generate files" not in answer.lower()
+            and not _has_real_citation(answer)):
+        try:
+            fix = _groq_call(
+                messages + [
+                    {"role": "assistant", "content": answer},
+                    {"role": "user", "content": (
+                        "Your answer has no [Chunk Title] citations. Rewrite it using ONLY facts stated in CONTEXT, "
+                        "with a [Chunk Title] after each factual sentence, and drop anything CONTEXT does not support. "
+                        "If CONTEXT does not support an answer, reply exactly: " + REFUSAL)},
+                ],
+                max_tok,
+            )
+            fixed = normalize_citations(fix.choices[0].message.content or "")
+            if fixed and (fixed == REFUSAL or _has_real_citation(fixed)):
+                answer = fixed
+        except Exception:
+            pass  # keep the original answer if the repair call fails
+
+    answer = _ensure_composite_shown(answer, calc)
+    return answer, retrieved, is_visual
 
 @st.cache_data(ttl=3600, max_entries=50, show_spinner=False)
 def _cached_ask(question: str):
