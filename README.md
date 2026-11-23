@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🎯 B2B Lead Scoring RAG
+# 🎯 B2B Lead Group Insurance Scoring RAG
 
 **An intelligent RevOps chatbot that translates complex account scoring models into actionable sales strategies.**
 
@@ -64,7 +64,7 @@ This app doesn't just trust the LLM. A post-generation layer checks every answer
 | **Tiering** | Priority MQL, MQL, Responder, Disqualified |
 | **Priority MQL** | Score ≥ 70, premium ≥ $1M, engagement ≥ 15, and at least one active signal |
 | **MQL** | Score ≥ 50 |
-| **Archetypes** | Champion, Achiever, Watcher, Dormant Giant, Fader, Lurker |
+| **Archetypes** | Champion, Achiever, Watcher, Dormant Giant, Fader, Lurker, Detractor (disqualified) |
 | **Fit Scoring** | Renewal proximity, premium size, industry fit, carrier, and broker presence |
 
 ### 🔍 RAG Pipeline
