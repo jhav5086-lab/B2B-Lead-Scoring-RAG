@@ -50,10 +50,14 @@ REFUSAL = "The provided model artifacts do not contain this information."
 EVAL_FILE = "./eval_cases.json"   # optional: enables the eval suite button in the sidebar
 QUOTE_CHARS = "\"'\u201c\u201d\u2018\u2019"
 
+# Phrases that usually carry a claim from the user, e.g. "Since Priority MQL needs 60..." or "I heard..."
+PREMISE_TRIGGERS = ("since ", "because ", "only needs", "only need", "just needs", "only requires",
+                    "needs a score", "requires a score", "i heard", "i read", "is it true")
+
 SELF_CHECK_TRIGGERS = (
     "confirm", "prove", "proves", "right?", "correct?", "is that true",
     "definitely", "always", "never", "guarantee", "means that", "so we should",
-)
+) + PREMISE_TRIGGERS
 
 # Matched against a punctuation-stripped, lower-cased question (see _is_meta_followup)
 META_PATTERN = re.compile(
@@ -141,9 +145,11 @@ SYSTEM_PROMPT = "\n".join([
 
 SELF_CHECK_PROMPT = "\n".join([
     "You are auditing a proposed answer for statistical integrity.",
-    "Check for: 1. Confirming false premises. 2. Missing citations. 3. Fabricated numbers or unsupported reasoning.",
+    "You receive <question>, <answer> and <context> sections.",
+    "Check for: 1. Confirming false premises (if the question states a number or rule that differs from <context>, the answer MUST begin by correcting it). 2. Missing citations. 3. Fabricated numbers or unsupported reasoning.",
     "DO NOT flag META-EXPLANATIONS or HYPOTHETICAL MATH as hallucinations.",
-    "If any failure: REWRITE the answer to fix it. If no failures: return the answer text exactly as given. Return ONLY the answer text."
+    "If any failure: REWRITE the answer to fix it. If no failures: return the answer text exactly as given.",
+    "Return ONLY the final answer text. Never repeat the question or the context, and never include the section tags."
 ])
 
 USER_TEMPLATE = "CONTEXT CHUNKS:\n{context}\n\nUSER QUESTION: {question}\n\nGrounded answer with [Title] citations (or Chart JSON if requested):"
@@ -355,8 +361,8 @@ def sanitize_context(text: str) -> str:
 def normalize_citations(text: str) -> str:
     text = re.sub(r"\(Source:\s*([^)]+)\)", r"[\1]", text)
     text = re.sub(r"\u3010([^\u3011]*)\u3011", r"[\1]", text)   # 【Title】 -> [Title]
-    text = re.sub(r"\s*\[(?:CALCULATION|CHART CONTEXT)[^\]]*\]", "", text)  # code-provided context is not a source
-    text = re.sub(r"\[(Chart \d+)\]", r"\1", text)                          # [Chart 1] -> Chart 1
+    text = re.sub(r"\s*\[(?:CALCULATION|CHART CONTEXT|PREMISE CHECK)[^\]]*\]", "", text)  # code-provided context is not a source
+    text = re.sub(r"\[(Chart \d+)\]", r"(\1)", text)                         # [Chart 1] -> (Chart 1)
     return text.strip()
 
 def _has_real_citation(text: str) -> bool:
@@ -523,6 +529,26 @@ def _groq_call(messages, max_tok):
             raise
     raise RuntimeError("Max retries reached")
 
+def _has_premise(q: str) -> bool:
+    ql = q.lower()
+    return any(t in ql for t in PREMISE_TRIGGERS)
+
+def _accept_selfcheck(checked: str, original: str) -> str:
+    """Use the audit pass's answer, but never a version that echoes the question/context or balloons in size."""
+    checked = (checked or "").strip()
+    m = re.search(r"<answer>\s*([\s\S]*?)\s*(?:</answer>|$)", checked)
+    if m:
+        checked = m.group(1).strip()
+    cuts = [checked.find(mk) for mk in ("\nC:", "\nQ:", "\nA:", "<context>", "<question>", "CONTEXT CHUNKS:")
+            if checked.find(mk) != -1]
+    if cuts:
+        checked = checked[:min(cuts)].strip()
+    if not checked or checked.upper() == "UNCHANGED":
+        return original
+    if len(checked) > 2 * len(original) + 300:
+        return original
+    return checked
+
 def _needs_self_check(q: str) -> bool:
     return any(tok in q.lower() for tok in SELF_CHECK_TRIGGERS)
 
@@ -581,6 +607,9 @@ def _ask_impl(question: str, history: list, all_charts: list = None):
         hint = _chart_hint(all_charts, question)
         if hint:
             context = f"CHART CONTEXT: {hint}\n\n{context}"
+        if _has_premise(question):
+            context = ("PREMISE CHECK (do not cite this line): the question states a number or rule. Compare it with CONTEXT; "
+                       "if it differs, begin your answer by correcting it.\n\n" + context)
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages += _history_messages(history)
@@ -602,13 +631,11 @@ def _ask_impl(question: str, history: list, all_charts: list = None):
             check = _groq_call(
                 [
                     {"role": "system", "content": SELF_CHECK_PROMPT},
-                    {"role": "user", "content": f"Q:\n{question}\n\nA:\n{answer}\n\nC:\n{context[:4000]}"},
+                    {"role": "user", "content": f"<question>\n{question}\n</question>\n<answer>\n{answer}\n</answer>\n<context>\n{context[:4000]}\n</context>"},
                 ],
                 max_tok,
             )
-            checked = (check.choices[0].message.content or "").strip()
-            if checked and checked.upper() != "UNCHANGED":
-                answer = checked
+            answer = _accept_selfcheck(check.choices[0].message.content or "", answer)
         except Exception:
             pass  # keep the original answer if the audit pass fails
 
@@ -859,6 +886,10 @@ def check_turn(res: dict, checks: dict) -> list:
         fails.append("retrieval ran but should have been skipped")
     if checks.get("cites") and not re.search(r"\[[^\]]+\]", body):
         fails.append("no [Title] citation found")
+    if re.search(r"(?m)^\s*(?:C|Q|A):\s*$", full) or "context chunks" in full.lower() or "<context>" in full.lower():
+        fails.append("answer leaks prompt/context text")
+    if "max_chars" in checks and len(body) > checks["max_chars"]:
+        fails.append(f"answer too long ({len(body)} chars, max {checks['max_chars']})")
     return fails
 
 def run_eval(cases: list, on_progress=None) -> list:
