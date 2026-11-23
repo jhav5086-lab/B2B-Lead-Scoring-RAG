@@ -2,46 +2,46 @@
   {
     "type": "model_summary",
     "title": "Lead Scoring Model Overview",
-    "text": "The B2B Lead Scoring Model evaluates 2,375 employers and 125 brokers. It uses a composite score (1-100) calculated as 0.4 * fit_score + 0.6 * account_engagement + 0.8 * broker_bonus. The model outputs a Tier (Priority MQL, MQL, Responder, Disqualified) and an Archetype (Champion, Achiever, Watcher, Dormant Giant, Fader, Lurker, Detractor)."
+    "text": "The B2B Lead Scoring Model evaluates 2,375 employers and 125 brokers. It uses a composite score calculated as 0.4 * fit_score + 0.6 * account_engagement + 0.8 * broker_bonus. The model outputs a Tier (Priority MQL, MQL, Responder, Disqualified) and an Archetype (Champion, Achiever, Watcher, Dormant Giant, Fader, Lurker, Detractor). This is a deterministic, heuristic prioritization framework, not a predictive conversion model."
   },
   {
     "type": "methodology",
     "title": "Fit Score Calculation Rules",
-    "text": "Fit score is based on: Renewal proximity (25 pts if <=30 days, 20 if <=60, 15 if <=90, 5 if <=180), Premium size (25 pts if >=$2M, 20 if >=$1M, 15 if >=$500K, 10 if >=$100K), Industry fit (15 pts for Target industries like Healthcare, Technology, Finance, Manufacturing, Professional Services; 8 for Adjacent; 0 for Non-Target), Carrier presence (10 pts for Aetna, UnitedHealth, Cigna), and Broker presence (15 pts)."
+    "text": "Fit score is based on: Renewal proximity (25 points if <=30 days, 20 if <=60 days, 15 if <=90 days, 5 if <=180 days); Premium size (25 points if >=$2M, 20 if >=$1M, 15 if >=$500K, 10 if >=$100K); Industry fit (15 points for target industries such as Healthcare, Technology, Finance, Manufacturing, and Professional Services; 8 for Adjacent; 0 for Non-Target); Carrier presence (10 points for Aetna, UnitedHealth, or Cigna); and Broker presence (15 points)."
   },
   {
     "type": "methodology",
     "title": "Engagement Score Rules",
-    "text": "Engagement is calculated from email and webinar activities. Email points range from 2 (generic) to 20 (high_intent) with a half-life decay. Webinar points include attendance (5), minutes (up to 5), polls (2), questions (5), and downloads (5). Account engagement = Best contact score + 0.3 * (other contacts) + 10 pt multi-stakeholder bonus if >=2 contacts are engaged."
+    "text": "Engagement is calculated from email and webinar activities. Email points range from 2 (generic) to 20 (high_intent), with half-life decay. Webinar points include attendance (5), minutes (up to 5), polls (2), questions (5), and downloads (5). Account engagement = best contact score + 0.3 * the scores of other contacts + a 10-point multi-stakeholder bonus if at least 2 contacts are engaged."
   },
   {
     "type": "recommendations",
     "title": "Tiering Definitions",
-    "text": "Priority MQL: Total score >=70, premium >=$1M, engagement >=15, and active signal (urgent renewal, multi-threaded, or broker engaged). MQL: Total score >=50. Responder: Score <50 but has engagement. Disqualified: Lives <50 or competitor domain."
+    "text": "Tier assignment follows the deterministic Python function determine_tier(score, premium, engagement): Priority MQL if premium >= $1,000,000 AND engagement >=15 AND total score >=70. Active signals such as urgent renewal, multi-threaded engagement, or broker engagement may be used as sales context, but they are not hard gates in the current tier function. MQL if total score >=50 and the Priority MQL conditions are not met. Responder if total score <50 and engagement >0. Disqualified if total score <50 and engagement is 0. The current determine_tier function does not independently check competitor domains; any competitor exclusion must be implemented and documented separately if required."
   },
   {
     "type": "segments",
     "title": "Archetype Definitions",
-    "text": "Champion: High fit (>=60), high engagement (>=40), multi-threaded. Achiever: High fit, high engagement, but single-threaded. Watcher: High fit, moderate engagement (15-40), no high-intent signals. Dormant Giant: High fit, low engagement (<15). Fader: Low fit, moderate engagement (5-15). Lurker: Low fit, low engagement. Detractor: Disqualified."
+    "text": "Champion: high fit (>=60), high engagement (>=40), and multi-threaded. Achiever: high fit and high engagement, but single-threaded. Watcher: high fit, moderate engagement (15-40), and no high-intent signals. Dormant Giant: high fit and low engagement (<15). Fader: low fit and moderate engagement (5-15). Lurker: low fit and low engagement. Detractor: Disqualified. These are descriptive segment definitions; the package currently does not provide a separately verified executable archetype-assignment function. Where definitions overlap at boundary values, apply a documented precedence rule before assigning one exclusive archetype."
   },
   {
     "type": "caveats",
     "title": "Limitations & Caveats",
-    "text": "This is a synthetic dataset. The scoring weights (0.4, 0.6, 0.8) are heuristic and not derived from actual closed-won revenue. A high total score indicates prioritization, not a guarantee of conversion. Archetypes must be validated against real sales cycles."
+    "text": "This is a synthetic dataset. The scoring weights (0.4, 0.6, 0.8) are heuristic and are not derived from actual closed-won revenue. A high total score indicates prioritization, not a guaranteed conversion or calibrated probability. Archetypes and scoring rules should be validated against real sales cycles before operational use."
   },
   {
     "type": "report_page",
     "title": "Tier Scorecard Summary",
-    "text": "Tier Counts: Disqualified = 475 accounts (0 SQLs), MQL = 1,134 accounts (498 SQLs), Priority MQL = 185 accounts (117 SQLs), Responder = 581 accounts (0 SQLs)."
+    "text": "Reference tier counts: Disqualified = 475 accounts (0 SQLs), MQL = 1,134 accounts (498 SQLs), Priority MQL = 185 accounts (117 SQLs), Responder = 581 accounts (0 SQLs). These tier counts sum to 2,375 employers."
   },
   {
     "type": "report_page",
     "title": "Archetype Scorecard Summary",
-    "text": "Archetype Counts: Champions = 145, Achievers = 210, Watchers = 350, Dormant Giants = 420, Faders = 500, Lurkers = 750, Detractors = 475."
+    "text": "Reference archetype counts currently recorded: Champions = 145, Achievers = 210, Watchers = 350, Dormant Giants = 420, Faders = 500, Lurkers = 750, Detractors = 475. These counts sum to 2,850, which is 475 higher than the stated 2,375-employer population. Treat this scorecard as unreconciled; do not present it as a mutually exclusive distribution of the same 2,375 employers until the underlying population, duplicates, or aggregation method is checked."
   },
   {
     "type": "recommendations",
     "title": "Available Charts",
-    "text": "You can generate the following charts: 1. Tier Distribution (from Tier Scorecard Summary). 2. SQL Count by Tier (from Tier Scorecard Summary). 3. Archetype Distribution (from Archetype Scorecard Summary). If the user asks for 'all plots', generate these three charts."
+    "text": "Available charts: 1. Tier Distribution (from Tier Scorecard Summary). 2. SQL Count by Tier (from Tier Scorecard Summary). 3. Archetype Distribution (from Archetype Scorecard Summary). When generating the Archetype Distribution, clearly label the counts as unreconciled and do not imply they represent a validated 2,375-account distribution."
   }
 ]
