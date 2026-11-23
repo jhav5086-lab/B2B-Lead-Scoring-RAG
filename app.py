@@ -165,11 +165,23 @@ GREETING_RE = re.compile(r"(h+e+l+o+|h+i+|h+e+y+|yo|good (morning|afternoon|even
 THANKS_RE = re.compile(r"(thanks|thank you|thx|ty)( a lot| so much)?")
 FAREWELL_RE = re.compile(r"(bye+|goodbye|good bye|see you|see ya|cya|good night)( for now)?")
 LEADIN_RE = re.compile(r"i (have|got) (a|one|another) (quick )?(question|query)")
+# Bare acknowledgements and vague openers that are not questions about the model
+ACK_RE = re.compile(r"(yes|yeah|yep|yup|no|nope|ok|okay|sure|alright|fine|cool|great|nice|got it|i see|hm+|oh|ah)")
+TELLME_RE = re.compile(r"tell me")
+FRUSTRATED_RE = re.compile(
+    r"(?:what the (?:hell|heck)|wtf|wth|what is going on|what are you doing|are you broken|this is broken|"
+    r"(?:this is |that is |thats |you are |youre )?(?:useless|not helpful|stupid))"
+)
+# A bare "why?" / "explain" on its own (as opposed to "why is X ...?"), used only when there is nothing to explain
+BARE_WHY_RE = re.compile(r"(?:but )?(?:why|why not|why is that|why so|explain|explain that|explain why|how come|what do you mean|huh)")
 # Feedback about the assistant itself (not a question about the model): "be careful about your words", "that's wrong"
 CAREFUL_RE = re.compile(
     r"(?:(?:but|and|also|please|just)\s+)*(?:be|stay|get)\s+(?:more\s+|very\s+)?(?:careful|precise|accurate|strict|exact)"
     r"(?:\s+(?:about|with|in)\s+(?:your|the)\s+(?:words|wording|answers?|numbers))?"
     r"|(?:watch|mind|choose)\s+your\s+(?:words|wording)"
+    r"|(?:(?:but|and|also|please|just)\s+)*(?:do\s*not|dont|never|stop)\s+"
+    r"(?:mislead|misleading|lie|lying|guess|guessing|hallucinate|hallucinating|make\s+things\s+up|making\s+things\s+up|make\s+stuff\s+up|making\s+stuff\s+up)(?:\s+me)?"
+    r"|(?:(?:but|and|also|please|just)\s+)*be\s+honest"
 )
 WRONG_RE = re.compile(r"(?:(?:thats|that is|this is|you are|youre|it is|its)\s+)?(?:wrong|incorrect|not right|not correct|false)")
 
@@ -194,6 +206,14 @@ def _smalltalk_reply(q: str):
         return "Goodbye! Come back any time you have questions about your lead scoring model."
     if LEADIN_RE.fullmatch(c):
         return "Sure, go ahead and ask your question."
+    if TELLME_RE.fullmatch(c):
+        return ("Happy to. What would you like to know? For example: what makes a Priority MQL, "
+                "how the Fit Score works, or a chart of the tier distribution.")
+    if FRUSTRATED_RE.fullmatch(c):
+        return ("Sorry for the confusion. I can only answer questions about this lead scoring model, so short replies "
+                "give me little to work with. Try asking about tiers, archetypes, fit scores, engagement or a chart.")
+    if ACK_RE.fullmatch(c):
+        return "Got it. Ask me about tiers, archetypes, fit scores, engagement or charts whenever you're ready."
     if CAREFUL_RE.fullmatch(c):
         return "Understood. I'll only state what the artifacts support and cite my sources. What would you like to check?"
     if WRONG_RE.fullmatch(c):
@@ -601,6 +621,12 @@ def _ask_impl(question: str, history: list, all_charts: list = None):
     if INJECTION_RE.search(question):  # obvious jailbreak / off-topic request: refuse without calling the LLM
         return INJECTION_REPLY, [], False
 
+    # A bare "why?" when no real question or refusal came before it: there is nothing to explain yet
+    if (BARE_WHY_RE.fullmatch(_clean(question)) and not _last_was_refusal(history)
+            and not any(m.get("role") == "user" and not _smalltalk_reply(m.get("content", "")) for m in history)):
+        return ("I'm not sure which answer you mean yet. Ask me a question about the lead scoring model "
+                "(tiers, archetypes, fit scores, engagement or charts) and I'll explain it."), [], False
+
     search_q = build_search_query(question, history, all_charts)
     is_visual = any(kw in question.lower() for kw in ["chart", "plot", "graph"])
     retrieved = []
@@ -965,6 +991,10 @@ def run_eval(cases: list, on_progress=None) -> list:
 def show_eval_results(results: list):
     passed = sum(1 for r in results if r["status"] == "PASS")
     st.subheader(f"{passed}/{len(results)} passed")
+    n_fail = sum(1 for r in results if r["status"] == "FAIL")
+    n_err = sum(1 for r in results if r["status"] == "ERROR")
+    n_skip = sum(1 for r in results if r["status"] == "SKIPPED")
+    st.caption(f"{n_fail} wrong answers · {n_err} errors (API or rate limit, not wrong answers) · {n_skip} not run")
     if any(r["status"] == "SKIPPED" for r in results):
         st.warning("The run stopped early because Groq's daily token limit was reached. Re-run after it resets.")
     df = pd.DataFrame([
@@ -973,7 +1003,7 @@ def show_eval_results(results: list):
     st.dataframe(df, use_container_width=True)
     for r in results:
         if r["status"] != "PASS":
-            with st.expander(f"❌ {r['id']} ({r['status']}): {r['name']}"):
+            with st.expander(f"{'❌' if r['status'] == 'FAIL' else '⏸️'} {r['id']} ({r['status']}): {r['name']}"):
                 st.markdown("**Problems:**\n" + "\n".join(f"- {p}" for p in r["problems"]))
                 st.markdown(f"**Last question:** {r['question']}")
                 st.markdown("**Answer:**")
