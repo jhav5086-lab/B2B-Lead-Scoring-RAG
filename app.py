@@ -165,6 +165,13 @@ GREETING_RE = re.compile(r"(h+e+l+o+|h+i+|h+e+y+|yo|good (morning|afternoon|even
 THANKS_RE = re.compile(r"(thanks|thank you|thx|ty)( a lot| so much)?")
 FAREWELL_RE = re.compile(r"(bye+|goodbye|good bye|see you|see ya|cya|good night)( for now)?")
 LEADIN_RE = re.compile(r"i (have|got) (a|one|another) (quick )?(question|query)")
+# Feedback about the assistant itself (not a question about the model): "be careful about your words", "that's wrong"
+CAREFUL_RE = re.compile(
+    r"(?:(?:but|and|also|please|just)\s+)*(?:be|stay|get)\s+(?:more\s+|very\s+)?(?:careful|precise|accurate|strict|exact)"
+    r"(?:\s+(?:about|with|in)\s+(?:your|the)\s+(?:words|wording|answers?|numbers))?"
+    r"|(?:watch|mind|choose)\s+your\s+(?:words|wording)"
+)
+WRONG_RE = re.compile(r"(?:(?:thats|that is|this is|you are|youre|it is|its)\s+)?(?:wrong|incorrect|not right|not correct|false)")
 
 _FUZZY_WORDS = {"hello": "greet", "hiya": "greet", "thanks": "thanks", "goodbye": "bye"}
 
@@ -187,6 +194,10 @@ def _smalltalk_reply(q: str):
         return "Goodbye! Come back any time you have questions about your lead scoring model."
     if LEADIN_RE.fullmatch(c):
         return "Sure, go ahead and ask your question."
+    if CAREFUL_RE.fullmatch(c):
+        return "Understood. I'll only state what the artifacts support and cite my sources. What would you like to check?"
+    if WRONG_RE.fullmatch(c):
+        return "Thanks for flagging that. Tell me which statement or number looks wrong and I'll check it against the artifacts."
     return None
 
 INJECTION_RE = re.compile(
@@ -508,6 +519,13 @@ def _track_usage(resp):
         st.session_state.usage["total"] += getattr(u, "total_tokens", 0) or 0
         st.session_state.usage["calls"] += 1
 
+def _parse_wait_seconds(err: str):
+    """Reads Groq's 'Please try again in 9m45.6s' / '6.23s' / '1h2m3s' hint. Returns seconds or None."""
+    m = re.search(r"try again in\s+(?:(\d+)h)?\s*(?:(\d+)m)?\s*([\d.]+)s", err)
+    if not m:
+        return None
+    return int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + float(m.group(3))
+
 def _groq_call(messages, max_tok):
     # gpt-oss models spend part of max_tokens on hidden reasoning; keep it short
     extra = {"reasoning_effort": "low"} if LLM_MODEL.startswith("openai/gpt-oss") else {}
@@ -519,13 +537,20 @@ def _groq_call(messages, max_tok):
             _track_usage(resp)
             return resp
         except Exception as e:
-            msg = str(e).lower()
+            err = str(e)
+            msg = err.lower()
             if extra and "reasoning" in msg:  # model/API rejected the parameter: retry without it
                 extra = {}
                 continue
-            if "429" in msg and attempt < MAX_RETRIES:
-                time.sleep(min(30, MAX_WAIT_SECONDS))
-                continue
+            if "429" in msg or "rate_limit" in msg or "rate limit" in msg:
+                wait = _parse_wait_seconds(err)
+                daily = "per day" in msg or "tpd" in msg
+                if daily or (wait is not None and wait > MAX_WAIT_SECONDS):
+                    # Waiting a few seconds will not help: fail fast instead of retrying every call
+                    raise RuntimeError(f"RATE_LIMIT_LONG:{int(wait) if wait is not None else 0}") from e
+                if attempt < MAX_RETRIES:
+                    time.sleep(min((wait if wait is not None else 30) + 1, MAX_WAIT_SECONDS))
+                    continue
             raise
     raise RuntimeError("Max retries reached")
 
@@ -681,7 +706,13 @@ def ask(question: str, history=None, all_charts=None, fresh: bool = False):
             answer, retrieved, is_visual = _ask_impl(question, history, all_charts or [])
         return answer, retrieved, is_visual, None
     except Exception as e:
-        return "", [], False, str(e)
+        err = str(e)
+        if err.startswith("RATE_LIMIT_LONG:"):
+            secs = int(err.split(":")[1] or 0)
+            when = f"about {max(1, round(secs / 60))} min" if secs else "later"
+            return "", [], False, (f"Groq's daily token limit is reached. Try again in {when}, "
+                                   "or set a different LLM_MODEL in Streamlit secrets.")
+        return "", [], False, err
 
 # =============================================================================
 # PARSER & RENDERER
@@ -899,6 +930,7 @@ def run_eval(cases: list, on_progress=None) -> list:
         if on_progress:
             on_progress(i - 1, len(cases), case["id"])
         messages, problems, last_q, last_a, status = [], [], "", "", "PASS"
+        aborted = False
         for n, turn in enumerate(case["turns"], 1):
             q = turn["q"].strip()
             last_q = q
@@ -909,6 +941,7 @@ def run_eval(cases: list, on_progress=None) -> list:
             if res.get("error"):
                 status = "ERROR"
                 problems.append(f"turn {n}: {res['error']}")
+                aborted = "daily token limit" in res["error"].lower()
                 break
             messages.append({"role": "user", "content": q})
             messages.append({"role": "assistant", "content": res["clean"],
@@ -920,6 +953,11 @@ def run_eval(cases: list, on_progress=None) -> list:
             status = "FAIL"
         results.append({"id": case["id"], "name": case.get("name", ""), "status": status,
                         "problems": problems, "question": last_q, "answer": last_a})
+        if aborted:  # no point hammering the API: mark the remaining cases as not run
+            for rest in cases[i:]:
+                results.append({"id": rest["id"], "name": rest.get("name", ""), "status": "SKIPPED",
+                                "problems": ["not run: Groq daily token limit reached"], "question": "", "answer": ""})
+            break
     if on_progress:
         on_progress(len(cases), len(cases), "done")
     return results
@@ -927,6 +965,8 @@ def run_eval(cases: list, on_progress=None) -> list:
 def show_eval_results(results: list):
     passed = sum(1 for r in results if r["status"] == "PASS")
     st.subheader(f"{passed}/{len(results)} passed")
+    if any(r["status"] == "SKIPPED" for r in results):
+        st.warning("The run stopped early because Groq's daily token limit was reached. Re-run after it resets.")
     df = pd.DataFrame([
         {"id": r["id"], "status": r["status"], "problems": "; ".join(r["problems"])[:160]} for r in results
     ])
@@ -953,6 +993,7 @@ if "usage" not in st.session_state:
     st.session_state.usage = {"total": 0, "calls": 0}
 
 run_eval_clicked = False
+only_failed = False
 with st.sidebar:
     st.session_state.bypass_cache = st.checkbox("Force fresh response", value=False)
     if st.button("Clear chat"):
@@ -963,6 +1004,9 @@ with st.sidebar:
     st.markdown(f"**Tokens used:** {st.session_state.usage['total']:,}")
     if os.path.exists(EVAL_FILE):
         st.divider()
+        only_failed = False
+        if st.session_state.get("eval_results"):
+            only_failed = st.checkbox("Only re-run cases that didn't pass last time", value=False)
         run_eval_clicked = st.button("🧪 Run eval suite")
         st.caption("Runs every test in eval_cases.json. Takes a few minutes and uses tokens.")
 
@@ -972,7 +1016,15 @@ if run_eval_clicked:
     _bar = st.progress(0.0, text="Starting eval...")
     def _tick(i, n, cid):
         _bar.progress(i / n, text=f"Running {cid} ({i}/{n})")
-    st.session_state.eval_results = run_eval(_cases, _tick)
+    _prev = st.session_state.get("eval_results") or []
+    if only_failed and _prev:
+        _todo = {r["id"] for r in _prev if r["status"] != "PASS"}
+        _new = run_eval([c for c in _cases if c["id"] in _todo], _tick)
+        _merged = {r["id"]: r for r in _prev}
+        _merged.update({r["id"]: r for r in _new})
+        st.session_state.eval_results = [_merged[c["id"]] for c in _cases if c["id"] in _merged]
+    else:
+        st.session_state.eval_results = run_eval(_cases, _tick)
     _bar.empty()
 
 if st.session_state.get("eval_results"):
